@@ -293,61 +293,238 @@ describe('evaluateWorktreeBaseDegrade', () => {
     assert.strictEqual(called, false, 'orchestrator mode: GSD controls the fork start-point, head is honored by construction');
   });
 
-  test('effectiveBaseRef="head" + harness mode (default) + diverged HEAD → degrade, reason baseref-head-ignored-by-harness (#3659)', () => {
-    // #48 verified 5/5 that the harness dispatch path never routes through
-    // project-settings baseRef — with head set on a diverged branch the check
-    // must compare and degrade, not trust the setting.
-    const HEAD_SHA = '11111111223344aa11111111223344aa11111111';
-    const FORK_SHA = '99999999223344bb99999999223344bb99999999';
+  test('effectiveBaseRef="head" + harness mode (default) + diverged HEAD → no degrade, reason baseref-head, execGit never called (#4588)', () => {
+    // #3659 made harness mode fall through to the origin/HEAD comparison on
+    // #48's finding that the harness did not read the setting. It does now —
+    // measured on current Claude Code from all three settings layers on macOS,
+    // Windows and Linux (#4588) — so `head` means the fork base IS the
+    // orchestrator HEAD in harness mode too, and there is nothing to compare.
+    let called = false;
     const result = evaluateWorktreeBaseDegrade({
-      execGit: makeDivergedExecGit(HEAD_SHA, FORK_SHA),
+      execGit: () => { called = true; return { exitCode: 0, stdout: '', stderr: '', signal: null, error: null }; },
       effectiveBaseRef: 'head',
     });
-    assert.strictEqual(result.shouldDegrade, true,
-      'head must not suppress the comparison in harness mode (#3659)');
-    assert.strictEqual(result.reason, 'baseref-head-ignored-by-harness');
-    assert.strictEqual(result.headSha, HEAD_SHA);
-    assert.strictEqual(result.forkRef, 'origin/HEAD');
-    assert.strictEqual(result.forkSha, FORK_SHA);
+    assert.strictEqual(result.shouldDegrade, false,
+      'head must suppress the comparison in harness mode: the Claude Code harness honors worktree.baseRef, as measured (#4588)');
+    assert.strictEqual(result.reason, 'baseref-head');
+    assert.strictEqual(result.message, null);
+    assert.strictEqual(result.headSha, null);
+    assert.strictEqual(result.forkRef, null);
+    assert.strictEqual(result.forkSha, null);
+    assert.strictEqual(called, false, 'no observation and head set: the fork base is known without asking git');
   });
 
-  test('effectiveBaseRef="head" + explicit harness-worktree mode + diverged → degrade (#3659)', () => {
-    const HEAD_SHA = 'aaaa1111223344ccaaaa1111223344ccaaaa1111';
-    const FORK_SHA = 'bbbb1111223344ddbbbb1111223344ddbbbb1111';
+  test('effectiveBaseRef="head" + explicit harness-worktree mode + diverged → no degrade (#4588)', () => {
     const result = evaluateWorktreeBaseDegrade({
-      execGit: makeDivergedExecGit(HEAD_SHA, FORK_SHA),
+      execGit: () => { throw new Error('execGit must not be called'); },
       effectiveBaseRef: 'head',
       isolationMode: 'harness-worktree',
+    });
+    assert.strictEqual(result.shouldDegrade, false);
+    assert.strictEqual(result.reason, 'baseref-head');
+  });
+
+  // ── observedForkBase (#4588): the measurement replaces the inference ─────
+
+  test('observedForkBase === HEAD + harness + head → no degrade, reason observed-fork-matches-head; origin/HEAD never resolved (#4588)', () => {
+    // The regression the triage brief named: an observed fork base equal to
+    // local HEAD in harness mode must be able to yield shouldDegrade:false.
+    const SAME_SHA = 'cccc1111223344eecccc1111223344eecccc1111';
+    const calls = [];
+    const result = evaluateWorktreeBaseDegrade({
+      execGit: (args) => {
+        calls.push(args.join(' '));
+        if (args.join(' ') === 'rev-parse HEAD') return { exitCode: 0, stdout: SAME_SHA, stderr: '', signal: null, error: null };
+        throw new Error(`Unexpected execGit call: ${JSON.stringify(args)}`);
+      },
+      effectiveBaseRef: 'head',
+      isolationMode: 'harness-worktree',
+      observedForkBase: SAME_SHA,
+    });
+    assert.strictEqual(result.shouldDegrade, false);
+    assert.strictEqual(result.reason, 'observed-fork-matches-head');
+    assert.strictEqual(result.headSha, SAME_SHA);
+    assert.strictEqual(result.forkRef, 'observed');
+    assert.strictEqual(result.forkSha, SAME_SHA);
+    assert.deepStrictEqual(calls, ['rev-parse HEAD'],
+      'an observation is the fork base — origin/HEAD must not be consulted');
+  });
+
+  test('observedForkBase !== HEAD + harness + head → degrade, reason baseref-head-ignored-by-harness, message names the observation (#4588)', () => {
+    // Acceptance criterion (2): a genuine mismatch keeps the existing
+    // degrade-and-warn — now reporting a measurement, not a belief.
+    const HEAD_SHA = '11111111223344aa11111111223344aa11111111';
+    const OBSERVED = '99999999223344bb99999999223344bb99999999';
+    const result = evaluateWorktreeBaseDegrade({
+      execGit: makeExecGit({
+        'rev-parse HEAD': { exitCode: 0, stdout: HEAD_SHA, stderr: '', signal: null, error: null },
+      }),
+      effectiveBaseRef: 'head',
+      observedForkBase: OBSERVED,
+    });
+    assert.strictEqual(result.shouldDegrade, true,
+      'head set but the host forked from elsewhere: the harness did not honor it — degrade (#4588)');
+    assert.strictEqual(result.reason, 'baseref-head-ignored-by-harness');
+    assert.strictEqual(result.headSha, HEAD_SHA);
+    assert.strictEqual(result.forkRef, 'observed');
+    assert.strictEqual(result.forkSha, OBSERVED);
+    assert.ok(result.message !== null, 'divergence under head must carry the explanatory message');
+    // Pinned VERBATIM — the source declares these messages downstream dependencies, and a
+    // substring check lets the untested portions drift (P4.6 review, round 3).
+    const expectedMsg = `⚠ Worktree base mismatch: worktree.baseRef:"head" is set, but a worktree created for this dispatch was observed to fork from ${OBSERVED.slice(0, 8)} while HEAD is ${HEAD_SHA.slice(0, 8)} — the worktree was not forked from HEAD despite the setting. Running this phase sequentially on the main working tree. Parallel worktrees return once a fresh dispatch is observed to fork from HEAD, or once HEAD is merged/pushed so the default fork base matches it. See #3659, #4588.`;
+    assert.strictEqual(result.message, expectedMsg);
+    assert.ok(result.message.includes('observed'), 'message must say the fork base was observed, not inferred');
+    assert.ok(!result.message.includes('runtime harness'),
+      'message must be mode-neutral — the observation may come from a GSD-created worktree (P4.6 review)');
+    assert.ok(result.message.includes('fresh dispatch'),
+      'remedy must ask for a fresh observation — pushing cannot change a fixed measurement');
+    assert.ok(result.message.includes(OBSERVED.slice(0, 8)) && result.message.includes(HEAD_SHA.slice(0, 8)),
+      'message must carry both short SHAs');
+    assert.ok(result.message.includes('sequentially'), 'message must state the sequential fallback');
+    assert.ok(result.message.includes('#4588'), 'message must cite the measurement issue');
+  });
+
+  test('observedForkBase !== HEAD + no baseRef → degrade, reason head-diverged-from-fork, forkRef "observed" (#4588)', () => {
+    const HEAD_SHA = 'aaaa1111223344ccaaaa1111223344ccaaaa1111';
+    const OBSERVED = 'bbbb1111223344ddbbbb1111223344ddbbbb1111';
+    const result = evaluateWorktreeBaseDegrade({
+      execGit: makeExecGit({
+        'rev-parse HEAD': { exitCode: 0, stdout: HEAD_SHA, stderr: '', signal: null, error: null },
+      }),
+      observedForkBase: OBSERVED,
+    });
+    assert.strictEqual(result.shouldDegrade, true);
+    assert.strictEqual(result.reason, 'head-diverged-from-fork');
+    assert.strictEqual(result.forkRef, 'observed');
+    assert.strictEqual(result.forkSha, OBSERVED);
+    // Pinned verbatim (P4.6 review, round 4) — the observed branch of buildMsgDiverged.
+    const expectedMsg = `⚠ Worktree base mismatch: HEAD (${HEAD_SHA.slice(0, 8)}) differs from the observed fork base (${OBSERVED.slice(0, 8)}). Running this phase sequentially on the main working tree. Parallel worktrees return once a fresh dispatch is observed to fork from HEAD, or once HEAD is merged/pushed so the default fork base matches it, or set worktree.baseRef:"head" to fork worktrees from HEAD instead (honored by GSD-created worktrees and by the Claude Code harness; #683, #4588).`;
+    assert.strictEqual(result.message, expectedMsg);
+    assert.ok(result.message.includes('the observed fork base'),
+      'message must phrase the fork side as an observation, not as a ref name');
+    assert.ok(result.message.includes('fresh dispatch') && !result.message.includes('so the observed fork base matches it'),
+      'remedy must not tell the user to push until a fixed observation matches');
+  });
+
+  test('observedForkBase is case-folded: an uppercase 40-hex observation equal to HEAD matches (#4588 review)', () => {
+    const SAME_SHA = '0123456789abcdef0123456789abcdef01234567';
+    const result = evaluateWorktreeBaseDegrade({
+      execGit: makeExecGit({
+        'rev-parse HEAD': { exitCode: 0, stdout: SAME_SHA, stderr: '', signal: null, error: null },
+      }),
+      observedForkBase: SAME_SHA.toUpperCase(),
+    });
+    assert.strictEqual(result.shouldDegrade, false);
+    assert.strictEqual(result.reason, 'observed-fork-matches-head');
+    assert.strictEqual(result.forkSha, SAME_SHA, 'forkSha is the canonical lowercase form');
+  });
+
+  test('observedForkBase accepts a 64-hex (SHA-256 repository) sha (#4588 review)', () => {
+    const SAME_SHA = 'a'.repeat(64);
+    const result = evaluateWorktreeBaseDegrade({
+      execGit: makeExecGit({
+        'rev-parse HEAD': { exitCode: 0, stdout: SAME_SHA, stderr: '', signal: null, error: null },
+      }),
+      observedForkBase: SAME_SHA,
+    });
+    assert.strictEqual(result.reason, 'observed-fork-matches-head');
+  });
+
+  test('observedForkBase that is not a string (number, object, boolean) THROWS rather than reading as absent (#4588 review r2)', () => {
+    for (const bad of [123, {}, true, []]) {
+      assert.throws(
+        () => evaluateWorktreeBaseDegrade({
+          execGit: () => { throw new Error('execGit must not be called'); },
+          effectiveBaseRef: 'head',
+          observedForkBase: bad,
+        }),
+        /observedForkBase must be a full 40- or 64-hex commit sha/,
+        `observedForkBase=${JSON.stringify(bad)} must fail closed, not short-circuit as baseref-head`
+      );
+    }
+  });
+
+  test('observedForkBase that is non-blank but not a full sha THROWS — an abbreviation could never match and would always degrade (#4588 review)', () => {
+    // One full-string pin so the validation message itself cannot drift (P4.6 review, round 4).
+    assert.throws(
+      () => evaluateWorktreeBaseDegrade({ execGit: () => { throw new Error('unreachable'); }, observedForkBase: 'HEAD' }),
+      { name: 'TypeError', message: 'evaluateWorktreeBaseDegrade: observedForkBase must be a full 40- or 64-hex commit sha (git rev-parse HEAD inside the worktree, before any commit), got "HEAD"' }
+    );
+    for (const bad of ['0123456', '0123456789abcdef0123456789abcdef0123456', 'HEAD', 'not-a-sha', 'g'.repeat(40), 'b'.repeat(41)]) {
+      assert.throws(
+        () => evaluateWorktreeBaseDegrade({
+          execGit: () => { throw new Error('execGit must not be called before the observation is validated'); },
+          effectiveBaseRef: 'head',
+          observedForkBase: bad,
+        }),
+        /observedForkBase must be a full 40- or 64-hex commit sha/,
+        `observedForkBase=${JSON.stringify(bad)} must fail closed`
+      );
+    }
+  });
+
+  test('observedForkBase === HEAD + no baseRef → no degrade, reason observed-fork-matches-head (#4588)', () => {
+    const SAME_SHA = 'dddd1111223344ffdddd1111223344ffdddd1111';
+    const result = evaluateWorktreeBaseDegrade({
+      execGit: makeExecGit({
+        'rev-parse HEAD': { exitCode: 0, stdout: SAME_SHA, stderr: '', signal: null, error: null },
+      }),
+      observedForkBase: SAME_SHA,
+    });
+    assert.strictEqual(result.shouldDegrade, false);
+    assert.strictEqual(result.reason, 'observed-fork-matches-head');
+  });
+
+  test('observedForkBase + head + orchestrator mode → the observation still decides (no short-circuit) (#4588)', () => {
+    // An observation is stronger than either mode's belief about the fork
+    // base: if GSD's own `git worktree add` somehow forked from elsewhere, the
+    // measurement — not the construction argument — is what the verdict reads.
+    const HEAD_SHA = 'eeee1111223344abeeee1111223344abeeee1111';
+    const OBSERVED = 'ffff1111223344acffff1111223344acffff1111';
+    const result = evaluateWorktreeBaseDegrade({
+      execGit: makeExecGit({
+        'rev-parse HEAD': { exitCode: 0, stdout: HEAD_SHA, stderr: '', signal: null, error: null },
+      }),
+      effectiveBaseRef: 'head',
+      isolationMode: 'orchestrator-worktree',
+      observedForkBase: OBSERVED,
     });
     assert.strictEqual(result.shouldDegrade, true);
     assert.strictEqual(result.reason, 'baseref-head-ignored-by-harness');
   });
 
-  test('effectiveBaseRef="head" + harness + HEAD == origin/HEAD → no degrade, reason head-matches-fork (#3659)', () => {
-    const SAME_SHA = 'cccc1111223344eecccc1111223344eecccc1111';
-    const result = evaluateWorktreeBaseDegrade({
-      execGit: makeExecGit({
-        'rev-parse HEAD': { exitCode: 0, stdout: SAME_SHA, stderr: '', signal: null, error: null },
-        'rev-parse --verify --quiet origin/HEAD': { exitCode: 0, stdout: SAME_SHA, stderr: '', signal: null, error: null },
-      }),
-      effectiveBaseRef: 'head',
-      isolationMode: 'harness-worktree',
-    });
-    assert.strictEqual(result.shouldDegrade, false,
-      'when the harness fork base happens to equal HEAD there is no mismatch to degrade for');
-    assert.strictEqual(result.reason, 'head-matches-fork');
+  test('observedForkBase empty or whitespace → treated as absent: head short-circuits, else origin/HEAD is inferred (#4588)', () => {
+    // Negative control for the observation path: an empty observation must
+    // not be mistaken for a measured fork base of "".
+    for (const empty of ['', '   ', null, undefined]) {
+      const viaHead = evaluateWorktreeBaseDegrade({
+        execGit: () => { throw new Error('execGit must not be called'); },
+        effectiveBaseRef: 'head',
+        observedForkBase: empty,
+      });
+      assert.strictEqual(viaHead.reason, 'baseref-head', `head + observedForkBase=${JSON.stringify(empty)} short-circuits`);
+
+      const HEAD_SHA = '12341234123412341234123412341234deadbeef';
+      const FORK_SHA = '43214321432143214321432143214321cafebabe';
+      const inferred = evaluateWorktreeBaseDegrade({
+        execGit: makeDivergedExecGit(HEAD_SHA, FORK_SHA),
+        observedForkBase: empty,
+      });
+      assert.strictEqual(inferred.reason, 'head-diverged-from-fork', `no head + observedForkBase=${JSON.stringify(empty)} infers origin/HEAD`);
+      assert.strictEqual(inferred.forkRef, 'origin/HEAD');
+    }
   });
 
-  test('harness head-diverge message cites the verified harness limitation (#3659)', () => {
-    const HEAD_SHA = 'dddd1111223344ffdddd1111223344ffdddd1111';
-    const FORK_SHA = 'eeee1111223344abeeceeee1111223344abeeceee';
+  test('observedForkBase does not bypass HEAD resolution: exit 128 → no-head unchanged (#4588)', () => {
     const result = evaluateWorktreeBaseDegrade({
-      execGit: makeDivergedExecGit(HEAD_SHA, FORK_SHA),
-      effectiveBaseRef: 'head',
+      execGit: makeExecGit({
+        'rev-parse HEAD': { exitCode: 128, stdout: '', stderr: 'fatal: not a git repo', signal: null, error: null },
+      }),
+      observedForkBase: 'abcdef1234567890abcdef1234567890abcdef12',
     });
-    assert.ok(result.message !== null, 'divergence under head must carry the explanatory message');
-    assert.ok(result.message.includes('#48'), 'message must cite the verified harness limitation');
-    assert.ok(result.message.includes('sequentially'), 'message must state the sequential fallback');
+    assert.strictEqual(result.shouldDegrade, false);
+    assert.strictEqual(result.reason, 'no-head');
+    assert.strictEqual(result.headAbsenceVerified, true);
   });
 
   test('git rev-parse HEAD fails → no degrade, reason no-head', () => {
@@ -391,6 +568,11 @@ describe('evaluateWorktreeBaseDegrade', () => {
     assert.strictEqual(result.shouldDegrade, true);
     assert.strictEqual(result.reason, 'head-unresolvable');
     assert.ok(result.message, 'a fail-closed degrade must carry a non-null explanatory message');
+    // Pinned verbatim (P4.6 review, round 4). #4588 dropped the sentence claiming
+    // baseRef:"head" "never applied" in harness mode — with head set this path is
+    // no longer reached at all, so the note would have been false.
+    assert.strictEqual(result.message,
+      '⚠ Cannot determine the worktree base (git rev-parse HEAD did not return a definitive answer). Running this phase sequentially on the main working tree to avoid an unverified base mismatch. Retry; if it persists, check for a stalled filesystem mount or a stale git index lock (.git/index.lock). See #683, #3050.');
     assert.strictEqual(result.headSha, null);
   });
 
@@ -517,10 +699,12 @@ describe('evaluateWorktreeBaseDegrade', () => {
     assert.strictEqual(result.headSha, HEAD_SHA);
     assert.strictEqual(result.forkRef, 'origin/HEAD');
     assert.strictEqual(result.forkSha, FORK_SHA);
-    // Verify message contains the short SHAs and the corrected remediation
-    // (#3659: the old text advised setting baseRef:"head", which the harness
-    // does not read).
-    const expectedMsg = `⚠ Worktree base mismatch: HEAD (${HEAD_SHA.slice(0, 8)}) differs from origin/HEAD (${FORK_SHA.slice(0, 8)}). Running this phase sequentially on the main working tree. Parallel worktrees return once HEAD is merged/pushed so origin/HEAD matches it. (worktree.baseRef:"head" applies only where GSD itself creates the worktree — the runtime harness does not read it; #48, #3659.)`;
+    // Verify message contains the short SHAs and the remediation. #3659 had
+    // removed the baseRef:"head" advice on #48's finding that the harness did
+    // not read the setting; it does now (#4588), so the advice is back — with
+    // the setting absent the harness really does fork from origin/HEAD, and
+    // `head` is the fix for that.
+    const expectedMsg = `⚠ Worktree base mismatch: HEAD (${HEAD_SHA.slice(0, 8)}) differs from origin/HEAD (${FORK_SHA.slice(0, 8)}). Running this phase sequentially on the main working tree. Parallel worktrees return once HEAD is merged/pushed so origin/HEAD matches it, or set worktree.baseRef:"head" to fork worktrees from HEAD instead (honored by GSD-created worktrees and by the Claude Code harness; #683, #4588).`;
     assert.strictEqual(result.message, expectedMsg);
   });
 
@@ -632,7 +816,11 @@ describe('cmdWorktreeBaseCheck', () => {
     assert.deepStrictEqual(parsed, result);
   });
 
-  test('baseRef=head in settings + default (harness) mode + diverged HEAD → shouldDegrade true (#3659)', () => {
+  test('baseRef=head in settings + default (harness) mode + diverged HEAD → shouldDegrade false, reason baseref-head (#4588)', () => {
+    // The #4588 symptom end to end: project-local head, harness mode, HEAD
+    // ahead of origin/HEAD — this returned baseref-head-ignored-by-harness and
+    // degraded every wave on an unmerged branch. The Claude Code harness honors the
+    // setting, so the check no longer compares.
     const cwd = '/repo';
     const claudeDir = '/repo/.claude';
     const HEAD_SHA = 'fade1111223344cafade1111223344cafade1111';
@@ -650,9 +838,87 @@ describe('cmdWorktreeBaseCheck', () => {
       userClaudeDir: '/nonexistent-hermetic-user-dir',
     };
     const result = cmdWorktreeBaseCheck(cwd, [], deps);
-    assert.strictEqual(result.shouldDegrade, true,
-      'settings head must not suppress the harness-mode comparison (#3659)');
+    assert.strictEqual(result.shouldDegrade, false,
+      'settings head suppresses the harness-mode comparison: the Claude Code harness honors worktree.baseRef, as measured (#4588)');
+    assert.strictEqual(result.reason, 'baseref-head');
+  });
+
+  test('--observed-fork-base <sha> equal to HEAD + settings head → observed-fork-matches-head (#4588)', () => {
+    const cwd = '/repo';
+    const claudeDir = '/repo/.claude';
+    const SAME_SHA = 'feed1111223344dafeed1111223344dafeed1111';
+    const deps = {
+      readFile: (p) => {
+        if (p === path.join(claudeDir, 'settings.local.json')) return JSON.stringify({ worktree: { baseRef: 'head' } });
+        return null;
+      },
+      execGit: makeExecGitCheck({
+        'rev-parse HEAD': { exitCode: 0, stdout: SAME_SHA, stderr: '', signal: null, error: null },
+      }),
+      write: () => {},
+      userClaudeDir: '/nonexistent-hermetic-user-dir',
+    };
+    const result = cmdWorktreeBaseCheck(cwd, ['--observed-fork-base', SAME_SHA], deps);
+    assert.strictEqual(result.shouldDegrade, false);
+    assert.strictEqual(result.reason, 'observed-fork-matches-head');
+    assert.strictEqual(result.forkRef, 'observed');
+  });
+
+  test('--observed-fork-base <sha> differing from HEAD + settings head → baseref-head-ignored-by-harness (#4588)', () => {
+    const cwd = '/repo';
+    const claudeDir = '/repo/.claude';
+    const HEAD_SHA = 'fade1111223344cafade1111223344cafade1111';
+    const OBSERVED = 'bead1111223344dbbead1111223344dbbead1111';
+    const deps = {
+      readFile: (p) => {
+        if (p === path.join(claudeDir, 'settings.local.json')) return JSON.stringify({ worktree: { baseRef: 'head' } });
+        return null;
+      },
+      execGit: makeExecGitCheck({
+        'rev-parse HEAD': { exitCode: 0, stdout: HEAD_SHA, stderr: '', signal: null, error: null },
+      }),
+      write: () => {},
+      userClaudeDir: '/nonexistent-hermetic-user-dir',
+    };
+    const result = cmdWorktreeBaseCheck(cwd, ['--mode', 'harness-worktree', '--observed-fork-base', OBSERVED], deps);
+    assert.strictEqual(result.shouldDegrade, true);
     assert.strictEqual(result.reason, 'baseref-head-ignored-by-harness');
+    assert.strictEqual(result.forkSha, OBSERVED);
+  });
+
+  test('--observed-fork-base rejects a missing or non-sha value — no silent fallback to inference (#4588)', () => {
+    const cwd = '/repo';
+    const deps = {
+      readFile: () => null,
+      execGit: makeExecGitCheck({}),
+      write: () => {},
+      userClaudeDir: '/nonexistent-hermetic-user-dir',
+    };
+    // Includes the abbreviated 7-char form: accepted by an earlier draft, it could never
+    // equal the full `rev-parse HEAD` output and so always degraded (P4.6 review).
+    for (const bad of [['--observed-fork-base'], ['--observed-fork-base', 'HEAD'], ['--observed-fork-base', 'abc'], ['--observed-fork-base', 'abcdef1'], ['--observed-fork-base', 'g'.repeat(40)], ['--observed-fork-base', 'a'.repeat(39)]]) {
+      assert.throws(
+        () => cmdWorktreeBaseCheck(cwd, bad, deps),
+        /--observed-fork-base: observedForkBase must be a full 40- or 64-hex commit sha/,
+        `args ${JSON.stringify(bad)} must fail closed`
+      );
+    }
+  });
+
+  test('--observed-fork-base folds case before comparing (#4588 review)', () => {
+    const cwd = '/repo';
+    const SAME_SHA = 'feed1111223344dafeed1111223344dafeed1111';
+    const deps = {
+      readFile: () => null,
+      execGit: makeExecGitCheck({
+        'rev-parse HEAD': { exitCode: 0, stdout: SAME_SHA, stderr: '', signal: null, error: null },
+      }),
+      write: () => {},
+      userClaudeDir: '/nonexistent-hermetic-user-dir',
+    };
+    const result = cmdWorktreeBaseCheck(cwd, ['--observed-fork-base', SAME_SHA.toUpperCase()], deps);
+    assert.strictEqual(result.reason, 'observed-fork-matches-head');
+    assert.strictEqual(result.forkSha, SAME_SHA);
   });
 
   test('--mode rejects invalid values — no silent default that would re-open the #3659 hole', () => {
@@ -1169,9 +1435,12 @@ describe('cmdWorktreeBaseCheck — user/global cascade (#1013)', () => {
     assert.strictEqual(result.reason, 'baseref-head');
   });
 
-  test('user/global head + phase lane + default (harness) mode → shouldDegrade:true (#3659)', () => {
-    // The mirror of the KEY REGRESSION row: in harness mode the setting cannot
-    // suppress anything (#48), so the same lane degrades.
+  test('user/global head + phase lane + default (harness) mode → shouldDegrade:false (#4588)', () => {
+    // The mirror of the KEY REGRESSION row. #3659 had this lane degrade in
+    // harness mode on #48's finding that the harness did not read the setting;
+    // the user/global layer in particular is honored by the harness (measured
+    // on current Claude Code, #4588 — the arm #4090's triage left to the
+    // originating investigation), so the same lane no longer degrades.
     const deps = {
       execGit: makePhaseLaneExecGit(HEAD_SHA),
       readFile: (p) => {
@@ -1186,9 +1455,9 @@ describe('cmdWorktreeBaseCheck — user/global cascade (#1013)', () => {
       userClaudeDir: USER_CLAUDE_DIR,
     };
     const result = cmdWorktreeBaseCheck(cwd, [], deps);
-    assert.strictEqual(result.shouldDegrade, true,
-      'harness mode: head must not suppress the lane degrade (#3659)');
-    assert.strictEqual(result.reason, 'fork-ref-unknown');
+    assert.strictEqual(result.shouldDegrade, false,
+      'harness mode: a user/global head suppresses the lane degrade — the Claude Code harness honors it, as measured (#4588)');
+    assert.strictEqual(result.reason, 'baseref-head');
   });
 
   test('(e negative) NO user/global head + same phase lane → shouldDegrade:true (proves lane degrades)', () => {
