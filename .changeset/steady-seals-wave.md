@@ -1,5 +1,5 @@
 ---
 type: Fixed
-pr: 0
+pr: 4752
 ---
 **`/gsd-execute-phase` waves no longer degrade to sequential on an unmerged branch when `worktree.baseRef:"head"` is set on a Claude Code (harness-worktree) host** — the pre-dispatch base check assumed the harness ignored the setting (a finding from an older Claude Code, fixed upstream in 2.1.128) and so reported `baseref-head-ignored-by-harness` for every wave whose HEAD differed from `origin/HEAD`, with no configuration able to change the outcome. The check now trusts `"head"` in both isolation modes, the way the harness actually behaves (measured from all three settings layers on macOS, Windows and Linux), and gains a `--observed-fork-base <sha>` input so a measured fork base can replace the `origin/HEAD` inference — a mismatch under `"head"` still degrades and warns. Without the setting the harness does fork from `origin/HEAD`, and that degrade is unchanged. The spawn-time exit-42 guard remains the backstop on a host that does not honor the setting. (#4588)
