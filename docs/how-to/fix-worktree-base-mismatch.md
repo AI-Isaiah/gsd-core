@@ -95,8 +95,11 @@ apply `worktree.baseRef` on that path. The check looks for such a hook in the sa
 files it reads `worktree.baseRef` from. When it finds one, or when one of those files does not
 parse, it compares `HEAD` against `origin/HEAD` as if the setting were absent, and a mismatch
 returns `shouldDegrade: true` with `reason: "baseref-head-bypassed-by-hook"` and a message naming
-the file (#4588). Parallel worktrees return once `HEAD` is merged or pushed, or once the hook is
-removed. Hooks from managed policy settings, a `--settings` file, plugins, agent frontmatter or SDK
+the file (#4588). That fallback is the comparison the check makes without the setting, and it does
+not know where your hook forks either: when `HEAD` matches `origin/HEAD` the check does not degrade,
+and the exit-42 guard below still catches a hook that forks elsewhere. For a measured verdict, pass the
+commit a hook-created worktree starts at as `--observed-fork-base` (described next), or remove the
+hook. Hooks from managed policy settings, a `--settings` file, plugins, agent frontmatter or SDK
 registrations are not visible to the check; there the exit-42 guard below is the backstop.
 
 If you have a real measurement of what a worktree on this host forked from (`git rev-parse HEAD`

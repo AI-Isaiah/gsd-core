@@ -1608,6 +1608,11 @@ describe('evaluateWorktreeBaseDegrade — WorktreeCreate hook interlock (#4588)'
       assert.strictEqual(result.forkSha, FORK_SHA);
       assert.ok(result.message.includes('WorktreeCreate hook is configured in /repo/.claude/settings.json'), result.message);
       assert.ok(!/harness does not honor/.test(result.message), 'the hook, not the harness, is named');
+      // origin/HEAD says nothing about where a hook forks, so the remedy must not promise that
+      // pushing restores parallelism; it points at a measurement instead (#4588 round review).
+      assert.ok(!/merged\/pushed/.test(result.message), result.message);
+      assert.ok(result.message.includes('--observed-fork-base'), result.message);
+      assert.ok(result.message.includes('remove the hook'), result.message);
     }
   });
 
@@ -1630,6 +1635,8 @@ describe('evaluateWorktreeBaseDegrade — WorktreeCreate hook interlock (#4588)'
     assert.strictEqual(result.shouldDegrade, true);
     assert.strictEqual(result.reason, 'baseref-head-bypassed-by-hook');
     assert.ok(result.message.includes('/repo/.claude/settings.local.json could not be parsed'), result.message);
+    assert.ok(result.message.includes('fix /repo/.claude/settings.local.json so it parses'), result.message);
+    assert.ok(!/merged\/pushed/.test(result.message), result.message);
   });
 
   test('hook + head + orchestrator-worktree mode → baseref-head unchanged, execGit never called (#4588)', () => {

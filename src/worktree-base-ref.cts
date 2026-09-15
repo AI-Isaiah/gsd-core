@@ -136,6 +136,9 @@ function buildMsgBaserefHeadIgnored(headSha: string | null, forkRef: string | nu
 // Names the hook and its file, never "the harness": the user configured the hook, so the
 // actionable remedy is theirs. An unparseable layer is phrased as "cannot be ruled out",
 // because the check does not know a hook is there — it only cannot prove one is not.
+// It deliberately promises nothing about pushing: neither HEAD nor the inferred fork base
+// says where a hook forks, so the only measured way back to a trusted verdict is an
+// observation (--observed-fork-base) or removing the cause (#4588 round review).
 function buildMsgBaserefHeadHookBypass(
   headSha: string | null,
   forkRef: string | null,
@@ -146,10 +149,10 @@ function buildMsgBaserefHeadHookBypass(
   const cause = finding.kind === 'hook'
     ? `a Claude Code WorktreeCreate hook is configured in ${finding.file}`
     : `${finding.file} could not be parsed, so a Claude Code WorktreeCreate hook in it cannot be ruled out`;
-  const remedy = finding.kind === 'hook'
-    ? `Parallel worktrees return once HEAD is merged/pushed so ${fork} matches it, or once the hook is removed`
-    : `Parallel worktrees return once ${finding.file} parses and declares no WorktreeCreate hook, or once HEAD is merged/pushed so ${fork} matches it`;
-  return `⚠ Worktree base mismatch: worktree.baseRef:"head" is set, but ${cause}. A WorktreeCreate hook creates Claude Code's agent worktrees itself and Claude Code does not apply worktree.baseRef to them, so the setting is not trusted and HEAD (${shortSha(headSha)}) is compared against ${fork} (${shortSha(forkSha)}), which differs. Running this phase sequentially on the main working tree. ${remedy}. See #4588.`;
+  const remove = finding.kind === 'hook'
+    ? 'remove the hook'
+    : `fix ${finding.file} so it parses`;
+  return `⚠ Worktree base mismatch: worktree.baseRef:"head" is set, but ${cause}. A WorktreeCreate hook creates Claude Code's agent worktrees itself and Claude Code does not apply worktree.baseRef to them, so the setting is not trusted. Without it the check can only compare HEAD (${shortSha(headSha)}) against ${fork} (${shortSha(forkSha)}), and they differ. Running this phase sequentially on the main working tree. Neither ref says where the hook forks: for a measured verdict, pass the commit a hook-created worktree starts at as --observed-fork-base, or ${remove}. See #4588.`;
 }
 
 // A commit sha as `git rev-parse HEAD` prints it: 40 hex (SHA-1) or 64 hex (SHA-256).
@@ -728,7 +731,11 @@ export function evaluateWorktreeBaseDegrade(deps?: {
   if (baseRefHead && observedForkBase === null && hookFinding !== null) {
     // Reachable only through the hook interlock in a.: "head" was not trusted because a
     // WorktreeCreate hook (or an unparseable settings layer) is in the harness's path, and
-    // HEAD differs from the inferred fork base (#4588).
+    // HEAD differs from the inferred fork base (#4588). The inferred comparison is the one
+    // this check made in harness mode before #4588 — it is not a measurement of the hook, so
+    // a match above (head-matches-fork) does not prove the hook forks from HEAD either; the
+    // spawn-time exit-42 guard stays the backstop for that case, and it halts even in a
+    // hook-emitted directory that is not a git worktree (its branch check fails first).
     const message = buildMsgBaserefHeadHookBypass(headSha, forkRef, forkSha, hookFinding);
     return { shouldDegrade: true, reason: 'baseref-head-bypassed-by-hook', message, headSha, forkRef, forkSha, headAbsenceVerified: null };
   }
