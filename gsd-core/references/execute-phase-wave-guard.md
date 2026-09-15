@@ -35,6 +35,9 @@
    orchestrator HEAD (GSD's own `git worktree add` by construction; the Claude Code harness as
    measured from all three settings layers, #4588; Cursor unmeasured), so this guard only fires when the setting
    is absent and HEAD has diverged from `origin/HEAD`. Parallel worktrees then return once HEAD
-   is merged/pushed so `origin/HEAD` matches it, or once the setting is applied. The exit-42
+   is merged/pushed so `origin/HEAD` matches it, or once the setting is applied. The exception
+   is a Claude Code `WorktreeCreate` hook in those settings files: the hook creates the worktree
+   without applying the setting, so the check compares against `origin/HEAD` anyway and a
+   mismatch degrades with `baseref-head-bypassed-by-hook` (#4588). The exit-42
    guard in each executor remains the backstop on a host that does not honor the setting.
    See #683 for the base-ref configuration detail.

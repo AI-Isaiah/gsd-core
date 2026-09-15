@@ -92,6 +92,13 @@ type ExecGitFn = typeof execGitSeam;
 // never reaches this check).
 type BaseCheckIsolationMode = 'harness-worktree' | 'orchestrator-worktree';
 
+/**
+ * A settings layer that defeats the `worktree.baseRef:"head"` trust (#4588): either it
+ * declares a Claude Code `WorktreeCreate` hook (`kind: 'hook'`), or it exists but does not
+ * parse, so a hook in it cannot be ruled out (`kind: 'unparseable'`). `file` is the path.
+ */
+export type WorktreeCreateHookFinding = { file: string; kind: 'hook' | 'unparseable' };
+
 // ─── Message constants (verbatim — downstream docs/tests depend on these) ─────
 
 // The fork side of the comparison is either an inferred ref (`origin/HEAD`,
@@ -124,6 +131,25 @@ const MSG_UNKNOWN = `⚠ Cannot determine the worktree fork base (origin/HEAD un
 function buildMsgBaserefHeadIgnored(headSha: string | null, forkRef: string | null, forkSha: string | null): string {
   void forkRef;
   return `⚠ Worktree base mismatch: worktree.baseRef:"head" is set, but a worktree created for this dispatch was observed to fork from ${shortSha(forkSha)} while HEAD is ${shortSha(headSha)} — the worktree was not forked from HEAD despite the setting. Running this phase sequentially on the main working tree. Parallel worktrees return once a fresh dispatch is observed to fork from HEAD, or once HEAD is merged/pushed so the default fork base matches it. See #3659, #4588.`;
+}
+
+// Names the hook and its file, never "the harness": the user configured the hook, so the
+// actionable remedy is theirs. An unparseable layer is phrased as "cannot be ruled out",
+// because the check does not know a hook is there — it only cannot prove one is not.
+function buildMsgBaserefHeadHookBypass(
+  headSha: string | null,
+  forkRef: string | null,
+  forkSha: string | null,
+  finding: WorktreeCreateHookFinding
+): string {
+  const fork = describeForkRef(forkRef);
+  const cause = finding.kind === 'hook'
+    ? `a Claude Code WorktreeCreate hook is configured in ${finding.file}`
+    : `${finding.file} could not be parsed, so a Claude Code WorktreeCreate hook in it cannot be ruled out`;
+  const remedy = finding.kind === 'hook'
+    ? `Parallel worktrees return once HEAD is merged/pushed so ${fork} matches it, or once the hook is removed`
+    : `Parallel worktrees return once ${finding.file} parses and declares no WorktreeCreate hook, or once HEAD is merged/pushed so ${fork} matches it`;
+  return `⚠ Worktree base mismatch: worktree.baseRef:"head" is set, but ${cause}. A WorktreeCreate hook creates Claude Code's agent worktrees itself and Claude Code does not apply worktree.baseRef to them, so the setting is not trusted and HEAD (${shortSha(headSha)}) is compared against ${fork} (${shortSha(forkSha)}), which differs. Running this phase sequentially on the main working tree. ${remedy}. See #4588.`;
 }
 
 // A commit sha as `git rev-parse HEAD` prints it: 40 hex (SHA-1) or 64 hex (SHA-256).
@@ -268,6 +294,70 @@ export function resolveEffectiveBaseRef(
 }
 
 /**
+ * Looks for a Claude Code `WorktreeCreate` hook in the settings layers that
+ * resolveEffectiveBaseRef reads (#4588). Such a hook replaces the harness's own worktree
+ * creation: the agent worktree is whatever directory the hook emits, and Claude Code does
+ * not consult `worktree.baseRef` on that path. So on a host that configures one, `"head"`
+ * says nothing about where a harness-created worktree forks from.
+ *
+ * Claude Code merges hooks across layers, so every layer is checked — not only the one
+ * that supplied `baseRef`. Layers, in the same order and with the same user/global
+ * de-duplication as resolveEffectiveBaseRef:
+ *   1. <claudeDir>/settings.local.json
+ *   2. <claudeDir>/settings.json
+ *   3. <userClaudeDir>/settings.json (only when provided and a different directory)
+ *
+ * Returns the first finding in that order, or null:
+ *   - kind 'hook'        — `hooks.WorktreeCreate` is present and not an empty list.
+ *   - kind 'unparseable' — the file exists but is not valid JSON/JSONC. Fails closed: a hook
+ *                          in it cannot be ruled out, and a false degrade costs a sequential
+ *                          wave where false trust costs every executor halting at exit 42.
+ * A layer deps.readFile reports as null (absent or unreadable) is skipped, exactly as in
+ * resolveEffectiveBaseRef, and so is a whitespace-only file, which cannot declare a hook.
+ *
+ * Settings files are the only hook sources readable from here. Claude Code also takes
+ * hooks from managed policy settings, a --settings file, plugins, agent frontmatter and
+ * SDK registrations; those stay invisible to this check, and the spawn-time exit-42 guard
+ * remains the backstop for them.
+ */
+export function findWorktreeCreateHook(
+  claudeDir: string,
+  deps?: { readFile?: (p: string) => string | null },
+  userClaudeDir?: string | null
+): WorktreeCreateHookFinding | null {
+  const readFile: (p: string) => string | null = deps?.readFile ?? ((p: string) => {
+    try {
+      return fs.readFileSync(p, 'utf8');
+    } catch {
+      return null;
+    }
+  });
+
+  const layers = [path.join(claudeDir, 'settings.local.json'), path.join(claudeDir, 'settings.json')];
+  if (userClaudeDir && path.resolve(userClaudeDir) !== path.resolve(claudeDir)) {
+    layers.push(path.join(userClaudeDir, 'settings.json'));
+  }
+
+  for (const file of layers) {
+    const contents = readFile(file);
+    if (contents == null || contents.trim() === '') continue;
+    let parsed: unknown;
+    try {
+      parsed = parseJsonc(contents);
+    } catch {
+      return { file, kind: 'unparseable' };
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+    const hooks = (parsed as Record<string, unknown>).hooks;
+    if (hooks === null || typeof hooks !== 'object' || Array.isArray(hooks)) continue;
+    const entry = (hooks as Record<string, unknown>).WorktreeCreate;
+    if (entry == null || (Array.isArray(entry) && entry.length === 0)) continue;
+    return { file, kind: 'hook' };
+  }
+  return null;
+}
+
+/**
  * CLI command: check current worktree base-ref degradation status.
  *
  * Reads effective baseRef from <cwd>/.claude settings (3-layer cascade:
@@ -318,12 +408,19 @@ export function cmdWorktreeBaseCheck(
     deps?.readFile ? { readFile: deps.readFile } : undefined,
     userClaudeDir
   );
+  // The WorktreeCreate-hook interlock (#4588) only matters where the evaluation would
+  // otherwise trust "head" without comparing: harness-created worktrees and no
+  // observation. Skip the settings reads everywhere else.
+  const worktreeCreateHook = effectiveBaseRef === 'head' && isolationMode === 'harness-worktree' && observedForkBase === null
+    ? findWorktreeCreateHook(claudeDir, deps?.readFile ? { readFile: deps.readFile } : undefined, userClaudeDir)
+    : null;
   const result = evaluateWorktreeBaseDegrade({
     cwd,
     effectiveBaseRef,
     execGit: deps?.execGit,
     isolationMode,
     observedForkBase,
+    worktreeCreateHook,
   });
   // Default emit goes through fs.writeSync(1, …), NOT process.stdout.write:
   // the CLI's --pick capture intercepts writeSync, and command substitution
@@ -463,6 +560,16 @@ export function evaluateWorktreeBaseDegrade(deps?: {
    * default) → the inference path, unchanged.
    */
   observedForkBase?: string | null;
+  /**
+   * A settings layer declaring a Claude Code `WorktreeCreate` hook, or one that does not
+   * parse (findWorktreeCreateHook, #4588). Consulted only under `harness-worktree` with no
+   * observation: there a hook, not the harness, creates the worktree and `worktree.baseRef`
+   * is not applied, so `"head"` does not short-circuit and the inferred comparison runs; a
+   * mismatch degrades with `baseref-head-bypassed-by-hook`. Ignored under
+   * `orchestrator-worktree` (GSD's own `git worktree add` never runs a Claude Code hook) and
+   * whenever an observation is supplied (the measurement already sees where a hook forked).
+   */
+  worktreeCreateHook?: WorktreeCreateHookFinding | null;
 }): {
   shouldDegrade: boolean;
   reason: string;
@@ -524,7 +631,17 @@ export function evaluateWorktreeBaseDegrade(deps?: {
   // Code only: Cursor also declares `harness-worktree` and is unmeasured, so
   // there the trust rests on the exit-42 backstop alone until someone reads a
   // worktree's HEAD on that host. (#683, #48, #3659, #4588.)
-  if (baseRefHead && observedForkBase === null) {
+  //
+  // The one exception is a Claude Code `WorktreeCreate` hook under harness-worktree
+  // (#4588): the hook creates the agent worktree from whatever directory it emits and the
+  // harness does not apply `worktree.baseRef` on that path, so the measurement above does
+  // not cover it. The short-circuit is withheld and the origin/HEAD inference below runs,
+  // as for a host without the setting; a mismatch degrades with
+  // `baseref-head-bypassed-by-hook`. orchestrator-worktree is unaffected — GSD runs
+  // `git worktree add` itself and no Claude Code hook is in that path.
+  const hookFinding: WorktreeCreateHookFinding | null = deps?.worktreeCreateHook ?? null;
+  const hookBypassesBaseRef = hookFinding !== null && (deps?.isolationMode ?? 'harness-worktree') === 'harness-worktree';
+  if (baseRefHead && observedForkBase === null && !hookBypassesBaseRef) {
     return { shouldDegrade: false, reason: 'baseref-head', message: null, headSha: null, forkRef: null, forkSha: null, headAbsenceVerified: null };
   }
 
@@ -607,6 +724,13 @@ export function evaluateWorktreeBaseDegrade(deps?: {
   if (forkSha === headSha) {
     const reason = forkRef === FORK_REF_OBSERVED ? 'observed-fork-matches-head' : 'head-matches-fork';
     return { shouldDegrade: false, reason, message: null, headSha, forkRef, forkSha, headAbsenceVerified: null };
+  }
+  if (baseRefHead && observedForkBase === null && hookFinding !== null) {
+    // Reachable only through the hook interlock in a.: "head" was not trusted because a
+    // WorktreeCreate hook (or an unparseable settings layer) is in the harness's path, and
+    // HEAD differs from the inferred fork base (#4588).
+    const message = buildMsgBaserefHeadHookBypass(headSha, forkRef, forkSha, hookFinding);
+    return { shouldDegrade: true, reason: 'baseref-head-bypassed-by-hook', message, headSha, forkRef, forkSha, headAbsenceVerified: null };
   }
   if (baseRefHead) {
     // Reachable only with an observation (a. returned otherwise): the setting

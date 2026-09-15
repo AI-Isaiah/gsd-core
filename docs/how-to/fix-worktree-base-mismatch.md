@@ -89,6 +89,16 @@ The output is JSON. With the setting in place expect `shouldDegrade: false` with
 `origin/HEAD` when the fork base is `HEAD` by configuration. Without the setting, on a diverged
 branch, expect `shouldDegrade: true` with `reason: "head-diverged-from-fork"`.
 
+**If you configure a Claude Code `WorktreeCreate` hook**, the setting does not reach the worktrees
+Claude Code dispatches: the hook creates them from the directory it emits, and Claude Code does not
+apply `worktree.baseRef` on that path. The check looks for such a hook in the same three settings
+files it reads `worktree.baseRef` from. When it finds one, or when one of those files does not
+parse, it compares `HEAD` against `origin/HEAD` as if the setting were absent, and a mismatch
+returns `shouldDegrade: true` with `reason: "baseref-head-bypassed-by-hook"` and a message naming
+the file (#4588). Parallel worktrees return once `HEAD` is merged or pushed, or once the hook is
+removed. Hooks from managed policy settings, a `--settings` file, plugins, agent frontmatter or SDK
+registrations are not visible to the check; there the exit-42 guard below is the backstop.
+
 If you have a real measurement of what a worktree on this host forked from (`git rev-parse HEAD`
 inside a freshly created isolated worktree, before any commit — the full sha, not an abbreviation),
 pass it and the check evaluates that instead of inferring:

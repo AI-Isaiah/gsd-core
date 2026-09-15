@@ -5,7 +5,8 @@
  *
  * Seam: gsd-core/bin/lib/worktree-base-ref.cjs
  * Interface: shortSha, readBaseRefFromSettings, applyWorktreeBaseRef,
- *            resolveEffectiveBaseRef, evaluateWorktreeBaseDegrade
+ *            resolveEffectiveBaseRef, findWorktreeCreateHook,
+ *            evaluateWorktreeBaseDegrade
  *
  * Issue #683: worktree base-mismatch detection and degradation logic.
  * All tests use dependency injection (inline stubs) — no real filesystem
@@ -28,6 +29,7 @@ const {
   readBaseRefFromSettings,
   applyWorktreeBaseRef,
   resolveEffectiveBaseRef,
+  findWorktreeCreateHook,
   evaluateWorktreeBaseDegrade,
   cmdWorktreeBaseCheck,
   cmdWorktreeSetBaseRef,
@@ -1501,6 +1503,255 @@ describe('cmdWorktreeBaseCheck — user/global cascade (#1013)', () => {
   __foldDescribe('folded:fix-1941-quick-worktree-stale-base', () => {
 
 const QUICK_WORKFLOW_PATH = path.join(__dirname, '..', 'gsd-core', 'workflows', 'quick.md');
+
+// ─── WorktreeCreate-hook interlock (#4588) ───────────────────────────────────
+//
+// A Claude Code WorktreeCreate hook creates the agent worktree from the directory it
+// emits, and Claude Code does not apply worktree.baseRef on that path. So the #4588
+// trust in "head" under harness-worktree must not hold on a host that configures one.
+
+const HOOK_SETTINGS = JSON.stringify({
+  hooks: { WorktreeCreate: [{ hooks: [{ type: 'command', command: 'make-worktree.sh' }] }] },
+});
+
+function settingsReader(files) {
+  return (p) => (Object.prototype.hasOwnProperty.call(files, p) ? files[p] : null);
+}
+
+describe('findWorktreeCreateHook (#4588)', () => {
+  const claudeDir = '/repo/.claude';
+  const USER_CLAUDE_DIR = '/home/user/.claude';
+  const LAYERS = [
+    path.join(claudeDir, 'settings.local.json'),
+    path.join(claudeDir, 'settings.json'),
+    path.join(USER_CLAUDE_DIR, 'settings.json'),
+  ];
+
+  test('a WorktreeCreate hook in each of the three layers is found and names that layer (#4588)', () => {
+    for (const file of LAYERS) {
+      const found = findWorktreeCreateHook(claudeDir, { readFile: settingsReader({ [file]: HOOK_SETTINGS }) }, USER_CLAUDE_DIR);
+      assert.deepStrictEqual(found, { file, kind: 'hook' }, `hook in ${file}`);
+    }
+  });
+
+  test('every layer is checked, not only the one that supplies baseRef (#4588)', () => {
+    const found = findWorktreeCreateHook(claudeDir, {
+      readFile: settingsReader({
+        [LAYERS[0]]: JSON.stringify({ worktree: { baseRef: 'head' } }),
+        [LAYERS[2]]: HOOK_SETTINGS,
+      }),
+    }, USER_CLAUDE_DIR);
+    assert.deepStrictEqual(found, { file: LAYERS[2], kind: 'hook' });
+  });
+
+  test('no settings, other hook events, an empty WorktreeCreate list or a blank file → null (#4588)', () => {
+    const cases = {
+      'no files': {},
+      'other hook events only': { [LAYERS[1]]: JSON.stringify({ hooks: { PreToolUse: [{ hooks: [] }], WorktreeRemove: [{ hooks: [] }] } }) },
+      'empty WorktreeCreate list': { [LAYERS[0]]: JSON.stringify({ hooks: { WorktreeCreate: [] } }) },
+      'baseRef only': { [LAYERS[0]]: JSON.stringify({ worktree: { baseRef: 'head' } }) },
+      'whitespace-only file': { [LAYERS[0]]: '  \n' },
+      'non-object top level': { [LAYERS[1]]: '[]' },
+    };
+    for (const [label, files] of Object.entries(cases)) {
+      assert.strictEqual(findWorktreeCreateHook(claudeDir, { readFile: settingsReader(files) }, USER_CLAUDE_DIR), null, label);
+    }
+  });
+
+  test('a layer that does not parse fails closed as kind "unparseable" (#4588)', () => {
+    const found = findWorktreeCreateHook(claudeDir, { readFile: settingsReader({ [LAYERS[1]]: '{ "hooks": ' }) }, USER_CLAUDE_DIR);
+    assert.deepStrictEqual(found, { file: LAYERS[1], kind: 'unparseable' });
+  });
+
+  test('JSONC comments and trailing commas still parse, so a commented hook is found (#4588)', () => {
+    const jsonc = '{\n  // local hook\n  "hooks": { "WorktreeCreate": [ { "hooks": [ { "type": "command", "command": "x" } ] }, ] },\n}\n';
+    const found = findWorktreeCreateHook(claudeDir, { readFile: settingsReader({ [LAYERS[0]]: jsonc }) }, USER_CLAUDE_DIR);
+    assert.deepStrictEqual(found, { file: LAYERS[0], kind: 'hook' });
+  });
+
+  test('user/global layer is read only when userClaudeDir is given and differs from claudeDir (#4588)', () => {
+    const readPaths = [];
+    const readFile = (p) => { readPaths.push(p); return null; };
+    findWorktreeCreateHook(claudeDir, { readFile }, claudeDir);
+    findWorktreeCreateHook(claudeDir, { readFile }, null);
+    findWorktreeCreateHook(claudeDir, { readFile });
+    assert.ok(!readPaths.includes(LAYERS[2]), 'user layer never read without a distinct userClaudeDir');
+    assert.strictEqual(readPaths.filter((p) => p === LAYERS[1]).length, 3, 'shared settings.json read once per call');
+  });
+});
+
+describe('evaluateWorktreeBaseDegrade — WorktreeCreate hook interlock (#4588)', () => {
+  const HEAD_SHA = 'a1a1a1a1b2b2b2b2c3c3c3c3d4d4d4d4e5e5e5e5';
+  const FORK_SHA = 'f6f6f6f6a7a7a7a7b8b8b8b8c9c9c9c9d0d0d0d0';
+  const HOOK = { file: '/repo/.claude/settings.json', kind: 'hook' };
+  const ok = (stdout) => ({ exitCode: 0, stdout, stderr: '', signal: null, error: null });
+  function stubGit(responses) {
+    return (args) => {
+      const key = args.join(' ');
+      if (Object.prototype.hasOwnProperty.call(responses, key)) return responses[key];
+      throw new Error(`Unexpected execGit call: ${JSON.stringify(args)}`);
+    };
+  }
+
+  test('head + harness mode + hook + HEAD diverged from origin/HEAD → degrade, reason baseref-head-bypassed-by-hook naming the file (#4588)', () => {
+    for (const isolationMode of [undefined, 'harness-worktree']) {
+      const result = evaluateWorktreeBaseDegrade({
+        execGit: stubGit({ 'rev-parse HEAD': ok(HEAD_SHA), 'rev-parse --verify --quiet origin/HEAD': ok(FORK_SHA) }),
+        effectiveBaseRef: 'head',
+        isolationMode,
+        worktreeCreateHook: HOOK,
+      });
+      assert.strictEqual(result.shouldDegrade, true, `isolationMode=${isolationMode}`);
+      assert.strictEqual(result.reason, 'baseref-head-bypassed-by-hook');
+      assert.strictEqual(result.headSha, HEAD_SHA);
+      assert.strictEqual(result.forkRef, 'origin/HEAD');
+      assert.strictEqual(result.forkSha, FORK_SHA);
+      assert.ok(result.message.includes('WorktreeCreate hook is configured in /repo/.claude/settings.json'), result.message);
+      assert.ok(!/harness does not honor/.test(result.message), 'the hook, not the harness, is named');
+    }
+  });
+
+  test('head + harness mode + hook + HEAD equal to origin/HEAD → no degrade, reason head-matches-fork (#4588)', () => {
+    const result = evaluateWorktreeBaseDegrade({
+      execGit: stubGit({ 'rev-parse HEAD': ok(HEAD_SHA), 'rev-parse --verify --quiet origin/HEAD': ok(HEAD_SHA) }),
+      effectiveBaseRef: 'head',
+      worktreeCreateHook: HOOK,
+    });
+    assert.strictEqual(result.shouldDegrade, false);
+    assert.strictEqual(result.reason, 'head-matches-fork');
+  });
+
+  test('an unparseable settings layer degrades with the same reason and says the hook cannot be ruled out (#4588)', () => {
+    const result = evaluateWorktreeBaseDegrade({
+      execGit: stubGit({ 'rev-parse HEAD': ok(HEAD_SHA), 'rev-parse --verify --quiet origin/HEAD': ok(FORK_SHA) }),
+      effectiveBaseRef: 'head',
+      worktreeCreateHook: { file: '/repo/.claude/settings.local.json', kind: 'unparseable' },
+    });
+    assert.strictEqual(result.shouldDegrade, true);
+    assert.strictEqual(result.reason, 'baseref-head-bypassed-by-hook');
+    assert.ok(result.message.includes('/repo/.claude/settings.local.json could not be parsed'), result.message);
+  });
+
+  test('hook + head + orchestrator-worktree mode → baseref-head unchanged, execGit never called (#4588)', () => {
+    const result = evaluateWorktreeBaseDegrade({
+      execGit: () => { throw new Error('execGit must not be called'); },
+      effectiveBaseRef: 'head',
+      isolationMode: 'orchestrator-worktree',
+      worktreeCreateHook: HOOK,
+    });
+    assert.strictEqual(result.shouldDegrade, false);
+    assert.strictEqual(result.reason, 'baseref-head');
+  });
+
+  test('hook + head + an observed fork base → the observation decides, not the hook (#4588)', () => {
+    const match = evaluateWorktreeBaseDegrade({
+      execGit: stubGit({ 'rev-parse HEAD': ok(HEAD_SHA) }),
+      effectiveBaseRef: 'head',
+      observedForkBase: HEAD_SHA,
+      worktreeCreateHook: HOOK,
+    });
+    assert.strictEqual(match.reason, 'observed-fork-matches-head');
+    const mismatch = evaluateWorktreeBaseDegrade({
+      execGit: stubGit({ 'rev-parse HEAD': ok(HEAD_SHA) }),
+      effectiveBaseRef: 'head',
+      observedForkBase: FORK_SHA,
+      worktreeCreateHook: HOOK,
+    });
+    assert.strictEqual(mismatch.reason, 'baseref-head-ignored-by-harness');
+  });
+
+  test('hook without "head" set → the ordinary divergence verdict, not the hook reason (#4588)', () => {
+    const result = evaluateWorktreeBaseDegrade({
+      execGit: stubGit({ 'rev-parse HEAD': ok(HEAD_SHA), 'rev-parse --verify --quiet origin/HEAD': ok(FORK_SHA) }),
+      effectiveBaseRef: 'fresh',
+      worktreeCreateHook: HOOK,
+    });
+    assert.strictEqual(result.reason, 'head-diverged-from-fork');
+  });
+
+  test('no hook finding (null or omitted) → head still short-circuits to baseref-head (#4588)', () => {
+    for (const worktreeCreateHook of [null, undefined]) {
+      const result = evaluateWorktreeBaseDegrade({
+        execGit: () => { throw new Error('execGit must not be called'); },
+        effectiveBaseRef: 'head',
+        worktreeCreateHook,
+      });
+      assert.strictEqual(result.reason, 'baseref-head', `worktreeCreateHook=${worktreeCreateHook}`);
+    }
+  });
+});
+
+describe('cmdWorktreeBaseCheck — WorktreeCreate hook interlock (#4588)', () => {
+  const cwd = '/repo';
+  const claudeDir = '/repo/.claude';
+  const USER_CLAUDE_DIR = '/home/user/.claude';
+  const LOCAL = path.join(claudeDir, 'settings.local.json');
+  const SHARED = path.join(claudeDir, 'settings.json');
+  const USER = path.join(USER_CLAUDE_DIR, 'settings.json');
+  const HEAD_SHA = '0a0a0a0a1b1b1b1b2c2c2c2c3d3d3d3d4e4e4e4e';
+  const FORK_SHA = '5f5f5f5f6a6a6a6a7b7b7b7b8c8c8c8c9d9d9d9d';
+  const ok = (stdout) => ({ exitCode: 0, stdout, stderr: '', signal: null, error: null });
+  function divergedGit() {
+    return (args) => {
+      const key = args.join(' ');
+      if (key === 'rev-parse HEAD') return ok(HEAD_SHA);
+      if (key === 'rev-parse --verify --quiet origin/HEAD') return ok(FORK_SHA);
+      throw new Error(`Unexpected execGit call: ${JSON.stringify(args)}`);
+    };
+  }
+  function run(files, args = []) {
+    return cmdWorktreeBaseCheck(cwd, args, {
+      readFile: settingsReader(files),
+      execGit: divergedGit(),
+      write: () => {},
+      userClaudeDir: USER_CLAUDE_DIR,
+    });
+  }
+
+  test('head set + a WorktreeCreate hook in each layer read + default harness mode → degrade, baseref-head-bypassed-by-hook (#4588)', () => {
+    for (const hookFile of [LOCAL, SHARED, USER]) {
+      const files = { [hookFile]: HOOK_SETTINGS };
+      // head comes from a layer that does not carry the hook, except when the hook shares project-local
+      files[hookFile === LOCAL ? USER : LOCAL] = JSON.stringify({ worktree: { baseRef: 'head' } });
+      const result = run(files);
+      assert.strictEqual(result.shouldDegrade, true, `hook in ${hookFile}`);
+      assert.strictEqual(result.reason, 'baseref-head-bypassed-by-hook', `hook in ${hookFile}`);
+      assert.ok(result.message.includes(hookFile), result.message);
+    }
+  });
+
+  test('head and the hook in the same file also degrades (#4588)', () => {
+    const both = JSON.stringify({ worktree: { baseRef: 'head' }, hooks: JSON.parse(HOOK_SETTINGS).hooks });
+    const result = run({ [SHARED]: both });
+    assert.strictEqual(result.reason, 'baseref-head-bypassed-by-hook');
+  });
+
+  test('the same hook changes nothing under --mode orchestrator-worktree or with --observed-fork-base (#4588)', () => {
+    const files = { [LOCAL]: JSON.stringify({ worktree: { baseRef: 'head' } }), [SHARED]: HOOK_SETTINGS };
+    assert.strictEqual(run(files, ['--mode', 'orchestrator-worktree']).reason, 'baseref-head');
+    assert.strictEqual(run(files, ['--observed-fork-base', HEAD_SHA]).reason, 'observed-fork-matches-head');
+    assert.strictEqual(run(files, ['--observed-fork-base', FORK_SHA]).reason, 'baseref-head-ignored-by-harness');
+  });
+
+  test('head set + no WorktreeCreate hook in any layer → baseref-head, the #4588 trust stays (#4588)', () => {
+    const result = run({
+      [LOCAL]: JSON.stringify({ worktree: { baseRef: 'head' }, hooks: { PreToolUse: [{ hooks: [] }] } }),
+      [USER]: JSON.stringify({ hooks: { WorktreeCreate: [] } }),
+    });
+    assert.strictEqual(result.shouldDegrade, false);
+    assert.strictEqual(result.reason, 'baseref-head');
+  });
+
+  test('head from the user layer + a project-local layer that does not parse → fails closed and degrades (#4588)', () => {
+    // resolveEffectiveBaseRef skips the unparseable layer and still resolves "head" from the
+    // user layer; the interlock treats that same layer as a possible hook, so the two stay
+    // consistent in direction — neither ever trusts "head" on the strength of a file it could not read.
+    const result = run({ [LOCAL]: '{ "worktree": ', [USER]: JSON.stringify({ worktree: { baseRef: 'head' } }) });
+    assert.strictEqual(result.shouldDegrade, true);
+    assert.strictEqual(result.reason, 'baseref-head-bypassed-by-hook');
+    assert.ok(result.message.includes(`${LOCAL} could not be parsed`), result.message);
+  });
+});
 
 describe('quick: pre-dispatch worktree base re-check (#1941)', () => {
   test('workflow file exists', () => {
