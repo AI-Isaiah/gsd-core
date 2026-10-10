@@ -3369,7 +3369,6 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
         parallelizationEnabled: () => {
           try { return require('./lib/config-loader.cjs').loadConfig(cwd).parallelization !== false; } catch { return false; }
         },
-        maxConcurrentAgents: () => config.readMaxConcurrentAgents(config.loadConfigJson(cwd)),
         namedDispatch: () => {
           const { runtimeEntry } = resolveDispatchCapacity(cwd);
           return runtimeEntry?.runtime?.hostIntegration?.dispatch?.namedDispatch === true;

@@ -1233,7 +1233,7 @@ Config keys declared in an overlay capability's `.config` slice federate into th
 | `parallelization.plan_level` | boolean | `true` | Parallelize at plan level |
 | `parallelization.task_level` | boolean | `false` | Parallelize tasks within a plan |
 | `parallelization.skip_checkpoints` | boolean | `true` | Skip checkpoints during parallel execution |
-| `parallelization.max_concurrent_agents` | number | `3` | Maximum simultaneous agents. Read by fan-out dispatch (`gsd_run loop fan-out-plan`, #5273) as one of the three terms of its concurrency cap, min(`dispatch-capacity`, this key, the plan's `maxWorkers`). Must be a positive integer: `config-set` rejects anything else, and a hand-edited invalid value makes a fan-out degrade to single-agent with reason `invalid_max_concurrent_agents` rather than being clamped. Setting it while `parallelization` is the boolean shorthand keeps that boolean as `parallelization.enabled`. |
+| `parallelization.max_concurrent_agents` | number | `3` | Maximum simultaneous agents |
 | `parallelization.min_plans_for_parallel` | number | `2` | Minimum plans to trigger parallel execution |
 
 > **Pre-commit hooks and parallel execution**: When parallelization is enabled, executor agents commit with `--no-verify` to avoid build lock contention (e.g., cargo lock fights in Rust projects). The orchestrator validates hooks once after each wave completes. STATE.md writes are protected by file-level locking to prevent concurrent write corruption. If you need hooks to run per-commit, set `parallelization.enabled: false`.

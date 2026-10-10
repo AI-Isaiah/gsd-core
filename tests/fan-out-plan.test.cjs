@@ -2,8 +2,9 @@
 
 /**
  * Fan-out seam (#5273, ADR-5273 Decisions 1, 2, 6 and 9): the plan validator, the concurrency
- * cap, the plan-time ladder, the manifest trait and field, the `parallelization.max_concurrent_agents`
- * config key, and the `loop fan-out-plan` verb.
+ * cap, the plan-time ladder, the manifest trait and field, and the `loop fan-out-plan` verb. The
+ * swarm sizing is the founder decision of 2026-10-10: `maxWorkers` defaults to 20 in the strategy
+ * and has no upper bound, so the boundaries here sit at 2, 20, 50 and 200.
  *
  * Pure-module cases call the exported functions. `planFanOut` is driven through injected seams
  * (config, runtime descriptor, strategy subprocess), never by mocking the ladder itself. Config
@@ -26,14 +27,14 @@ const {
   readStrategySingle,
   FAN_OUT_REASON,
   FAN_OUT_WORKER_AGENT,
-  AGENT_BUDGET,
-  MAX_WORKERS,
+  AGENT_OVERHEAD,
+  ANSWER_MAX_BYTES,
+  agentBudget,
   MIN_WORKERS,
   PROMPT_MAX_BYTES,
   SCHEMA_MAX_BYTES,
   SCOPE_MAX_PATHS,
 } = require('../gsd-core/bin/lib/fan-out-plan.cjs');
-const { readMaxConcurrentAgents, DEFAULT_MAX_CONCURRENT_AGENTS } = require('../gsd-core/bin/lib/config.cjs');
 const { validateCapability, validateCrossCapability } = require('../gsd-core/bin/lib/capability-validator.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -47,7 +48,10 @@ const resolveModel = (agent) => MODELS[agent] || null;
 // ─── Fixture builders: each returns a VALID value the test then mutates ─────
 
 let projectRoot;
-const FILES = ['a.js', 'b.js', 'c.js', 'd.js', 'e.js', 'f.js', 'g.js'];
+/** The strategy's default `swarm.max_workers` and `swarm.max_concurrency` (ADR-5273 Decision 7). */
+const SWARM_DEFAULT = 20;
+const FILES = ['a.js', 'b.js', 'c.js', 'd.js', 'e.js', 'f.js', 'g.js',
+  ...Array.from({ length: 204 }, (_, i) => `w${String(i).padStart(3, '0')}.js`)];
 
 before(() => {
   projectRoot = createTempDir('gsd-fan-out-');
@@ -84,12 +88,13 @@ function synthesizer(overrides = {}) {
   return { purpose: 'synthesizer', agentType: STEP_AGENT, ...MODELS[STEP_AGENT], prompt: 'Synthesize.', schema: null, ...overrides };
 }
 
-function fanOutPlan(nWorkers = 2, { maxWorkers = MAX_WORKERS, cross = false } = {}) {
+function fanOutPlan(nWorkers = 2, { maxWorkers = SWARM_DEFAULT, maxConcurrency = SWARM_DEFAULT, cross = false } = {}) {
   const files = FILES.slice(0, nWorkers);
   return {
     mode: 'fan-out',
     stage: 'fan-out',
     maxWorkers,
+    maxConcurrency,
     stages: [
       { id: 'workers', dispatches: [...files.map((f) => worker(f)), ...(cross ? [crossFile(files)] : [])] },
       { id: 'synthesize', dispatches: [synthesizer()] },
@@ -101,7 +106,8 @@ function decomposePlan() {
   return {
     mode: 'fan-out',
     stage: 'decompose',
-    maxWorkers: MAX_WORKERS,
+    maxWorkers: SWARM_DEFAULT,
+    maxConcurrency: SWARM_DEFAULT,
     stages: [{
       id: 'decompose',
       dispatches: [{ purpose: 'decompose', agentType: FAN_OUT_WORKER_AGENT, ...MODELS[STEP_AGENT], prompt: 'Split the brief.', schema: { type: 'object' } }],
@@ -145,16 +151,26 @@ describe('validateFanOutPlan: accepted shapes', () => {
 });
 
 describe('validateFanOutPlan: boundaries (limit-1, limit, limit+1)', () => {
-  test('maxWorkers 1 and 7 are invalid, 2 and 6 are accepted', () => {
+  test('maxWorkers 1 is invalid; 2, 20, 50 and 200 are accepted (no upper bound)', () => {
     const at = (mw) => verdict(validateFanOutPlan(fanOutPlan(2, { maxWorkers: mw }), ctx()));
-    assert.deepEqual([1, 2, 6, 7].map(at), ['invalid_plan', 'ok', 'ok', 'invalid_plan']);
+    assert.deepEqual([1, 2, 20, 50, 200].map(at), ['invalid_plan', 'ok', 'ok', 'ok', 'ok']);
     assert.equal(MIN_WORKERS, 2);
-    assert.equal(MAX_WORKERS, 6);
+  });
+
+  test('maxWorkers and maxConcurrency must be safe integers; maxConcurrency 0 is invalid, 1 is accepted', () => {
+    const atMc = (mc) => verdict(validateFanOutPlan(fanOutPlan(2, { maxConcurrency: mc }), ctx()));
+    assert.deepEqual([0, 1, 20].map(atMc), ['invalid_plan', 'ok', 'ok']);
+    for (const bad of [2.5, 2 ** 53, '20', null]) {
+      assert.equal(verdict(validateFanOutPlan(fanOutPlan(2, { maxWorkers: bad }), ctx())), 'invalid_plan', String(bad));
+      assert.equal(verdict(validateFanOutPlan(fanOutPlan(2, { maxConcurrency: bad }), ctx())), 'invalid_plan', String(bad));
+    }
   });
 
   test('worker units 1 → too_few_units, 2 and maxWorkers → ok, maxWorkers+1 → invalid_plan', () => {
-    const at = (n) => verdict(validateFanOutPlan(fanOutPlan(n, { maxWorkers: MAX_WORKERS }), ctx()));
-    assert.deepEqual([1, 2, MAX_WORKERS, MAX_WORKERS + 1].map(at), ['too_few_units', 'ok', 'ok', 'invalid_plan']);
+    for (const mw of [SWARM_DEFAULT, 50, 200]) {
+      const at = (n) => verdict(validateFanOutPlan(fanOutPlan(n, { maxWorkers: mw }), ctx()));
+      assert.deepEqual([1, 2, mw, mw + 1].map(at), ['too_few_units', 'ok', 'ok', 'invalid_plan'], `maxWorkers ${mw}`);
+    }
   });
 
   test('a plan with more units than its own smaller maxWorkers is invalid_plan', () => {
@@ -163,14 +179,21 @@ describe('validateFanOutPlan: boundaries (limit-1, limit, limit+1)', () => {
     assert.match(r.detail, /4 worker units, more than maxWorkers 3/);
   });
 
-  test('agent totals 8 and 9 pass, 10 is over_agent_budget (fallback reserved)', () => {
-    // 6 workers + 1 cross-file + 1 synthesizer = 8 planned; + 1 reserved fallback = 9.
-    const at = (prior) => validateFanOutPlan(fanOutPlan(6, { cross: true }), ctx({ priorDispatches: prior }));
-    assert.equal(verdict(validateFanOutPlan(fanOutPlan(5, { cross: true }), ctx())), 'ok'); // 7 + 1 = 8
-    assert.equal(verdict(at(0)), 'ok'); // 9
-    const r = at(1); // 10
+  test('agent totals maxWorkers+2 and +3 pass, +4 is over_agent_budget (fallback reserved)', () => {
+    assert.equal(AGENT_OVERHEAD, 3);
+    assert.equal(agentBudget(50), 53);
+    // 50 workers + 1 cross-file + 1 synthesizer = 52 planned; + 1 reserved fallback = 53.
+    const full = () => fanOutPlan(50, { maxWorkers: 50, cross: true });
+    assert.equal(verdict(validateFanOutPlan(fanOutPlan(49, { maxWorkers: 50, cross: true }), ctx())), 'ok'); // 52
+    assert.equal(verdict(validateFanOutPlan(full(), ctx())), 'ok'); // 53
+    const r = validateFanOutPlan(full(), ctx({ priorDispatches: 1 })); // 54
     assert.equal(r.reason, FAN_OUT_REASON.OVER_AGENT_BUDGET);
-    assert.equal(r.detail, `1 prior + 8 planned + 1 reserved fallback = 10 > ${AGENT_BUDGET}`);
+    assert.equal(r.detail, '1 prior + 52 planned + 1 reserved fallback = 54 > maxWorkers 50 + 3 = 53');
+  });
+
+  test('a research swarm of maxWorkers after its decomposition fits the budget exactly', () => {
+    // 1 decomposition + 50 workers + 1 synthesizer + 1 fallback = 53 = maxWorkers + 3.
+    assert.equal(verdict(validateFanOutPlan(fanOutPlan(50, { maxWorkers: 50 }), ctx({ priorDispatches: 1 }))), 'ok');
   });
 
   test('prompt and schema byte bounds: limit passes, limit+1 is invalid_plan', () => {
@@ -229,6 +252,7 @@ describe('validateFanOutPlan: every invalid part is rejected by name', () => {
     ['stage id that is not a slug', (p) => { p.stages[0].id = 'Workers!'; }, /id is not a slug/],
     ['mode other than fan-out', (p) => { p.mode = 'single'; }, /plan\.mode is not "fan-out"/],
     ['non-integer maxWorkers', (p) => { p.maxWorkers = 2.5; }, /maxWorkers is not an integer/],
+    ['missing maxConcurrency', (p) => { delete p.maxConcurrency; }, /maxConcurrency is not an integer/],
   ];
   for (const [name, mutate, detail] of cases) {
     test(name, () => {
@@ -297,9 +321,9 @@ describe('checkScopePath: hostile paths never read outside the root', () => {
 });
 
 describe('validateFanOutPlan: properties', () => {
-  const nWorkers = fc.integer({ min: MIN_WORKERS, max: MAX_WORKERS });
-  const validPlanArb = fc.record({ n: nWorkers, cross: fc.boolean(), extra: fc.integer({ min: 0, max: MAX_WORKERS }) })
-    .map(({ n, cross, extra }) => fanOutPlan(n, { cross, maxWorkers: Math.min(MAX_WORKERS, n + extra) }));
+  const nWorkers = fc.integer({ min: MIN_WORKERS, max: 60 });
+  const validPlanArb = fc.record({ n: nWorkers, cross: fc.boolean(), extra: fc.integer({ min: 0, max: 500 }), mc: fc.integer({ min: 1, max: 100 }) })
+    .map(({ n, cross, extra, mc }) => fanOutPlan(n, { cross, maxWorkers: n + extra, maxConcurrency: mc }));
 
   test('every plan built from valid parts is accepted', () => {
     fc.assert(fc.property(validPlanArb, (plan) => validateFanOutPlan(plan, ctx()).ok === true));
@@ -312,7 +336,8 @@ describe('validateFanOutPlan: properties', () => {
     (p) => { p.stages[0].dispatches[0].scope = ['../x']; },
     (p) => { p.stages[0].dispatches[0].prompt = 'x'.repeat(PROMPT_MAX_BYTES + 1); },
     (p) => { p.stages[1].dispatches[0].agentType = FAN_OUT_WORKER_AGENT; },
-    (p) => { p.maxWorkers = MAX_WORKERS + 1; },
+    (p) => { p.maxWorkers = 1; },
+    (p) => { p.maxConcurrency = 0; },
     (p) => { p.surprise = true; },
   ];
 
@@ -330,32 +355,27 @@ describe('validateFanOutPlan: properties', () => {
 
 // ─── resolveConcurrency ──────────────────────────────────────────────────────
 
-describe('resolveConcurrency: C = min(dispatch-capacity, max_concurrent_agents, maxWorkers)', () => {
-  const ok = (value) => ({ ok: true, value });
-  const at = (cap, mca, mw) => resolveConcurrency({ dispatchCapacity: cap, maxConcurrentAgents: ok(mca), maxWorkers: mw });
+describe('resolveConcurrency: C = min(dispatch-capacity, maxConcurrency, maxWorkers)', () => {
+  const at = (cap, mc, mw) => resolveConcurrency({ dispatchCapacity: cap, maxConcurrency: mc, maxWorkers: mw });
 
   test('C is the minimum of the three terms', () => {
-    assert.deepEqual(at(20, 3, 6), { ok: true, c: 3, terms: { dispatchCapacity: 20, maxConcurrentAgents: 3, maxWorkers: 6 } });
-    assert.equal(at(4, 10, 6).c, 4);
-    assert.equal(at(20, 10, 2).c, 2);
+    assert.deepEqual(at(20, 20, 50), { ok: true, c: 20, terms: { dispatchCapacity: 20, maxConcurrency: 20, maxWorkers: 50 } });
+    assert.equal(at(4, 20, 50).c, 4);
+    assert.equal(at(20, 8, 50).c, 8);
+    assert.equal(at(20, 20, 3).c, 3);
   });
 
   test('each term at 1 gives no_concurrency, at 2 gives C = 2', () => {
-    for (const [cap, mca, mw] of [[1, 9, 6], [9, 1, 6], [9, 9, 1]]) {
-      const r = at(cap, mca, mw);
+    for (const [cap, mc, mw] of [[1, 20, 20], [20, 1, 20], [20, 20, 1]]) {
+      const r = at(cap, mc, mw);
       assert.equal(r.reason, FAN_OUT_REASON.NO_CONCURRENCY);
       assert.match(r.detail, /= 1$/);
     }
-    for (const [cap, mca, mw] of [[2, 9, 6], [9, 2, 6], [9, 9, 2]]) assert.equal(at(cap, mca, mw).c, 2);
-  });
-
-  test('an invalid configured value fails closed, never clamped', () => {
-    const r = resolveConcurrency({ dispatchCapacity: 20, maxConcurrentAgents: { ok: false, value: 0 }, maxWorkers: 6 });
-    assert.deepEqual(r, { ok: false, reason: FAN_OUT_REASON.INVALID_MAX_CONCURRENT_AGENTS, detail: 'parallelization.max_concurrent_agents is 0, not a positive integer' });
+    for (const [cap, mc, mw] of [[2, 20, 20], [20, 2, 20], [20, 20, 2]]) assert.equal(at(cap, mc, mw).c, 2);
   });
 
   test('a non-positive or non-integer capacity is treated as the fail-closed floor 1', () => {
-    for (const cap of [0, -3, 2.5, NaN]) assert.equal(at(cap, 9, 6).reason, FAN_OUT_REASON.NO_CONCURRENCY);
+    for (const cap of [0, -3, 2.5, NaN]) assert.equal(at(cap, 20, 20).reason, FAN_OUT_REASON.NO_CONCURRENCY);
   });
 });
 
@@ -367,7 +387,6 @@ function deps(overrides = {}) {
     resolveStep: () => ({ trait: true, strategies: [{ capId: 'swarm', command: 'swarm plan' }] }),
     invokeStrategy: (s) => { calls.push(s.command); return { ok: true, answer: fanOutPlan(3) }; },
     parallelizationEnabled: () => true,
-    maxConcurrentAgents: () => ({ ok: true, value: 3 }),
     namedDispatch: () => true,
     dispatchCapacity: () => ({ capacity: 20, source: 'descriptor', reason: 'ok' }),
     resolveModel,
@@ -385,7 +404,9 @@ describe('planFanOut: plan-time ladder', () => {
     assert.deepEqual(r.strategy, { capId: 'swarm', command: 'swarm plan' });
     assert.equal(r.dispatches, 4);
     assert.equal(r.reservedFallback, 1);
-    assert.deepEqual(r.concurrency, { c: 3, terms: { dispatchCapacity: 20, maxConcurrentAgents: 3, maxWorkers: MAX_WORKERS }, capacitySource: 'descriptor', capacityReason: 'ok' });
+    assert.deepEqual(r.concurrency, { c: 20, terms: { dispatchCapacity: 20, maxConcurrency: SWARM_DEFAULT, maxWorkers: SWARM_DEFAULT }, capacitySource: 'descriptor', capacityReason: 'ok' });
+    assert.equal(r.answerMaxBytes, ANSWER_MAX_BYTES);
+    assert.equal(ANSWER_MAX_BYTES, 4096);
   });
 
   test('no trait → quiet no_fan_out_trait, and the strategy is never invoked', () => {
@@ -423,11 +444,22 @@ describe('planFanOut: plan-time ladder', () => {
     assert.equal(readStrategySingle({ mode: 'fan-out' }), null);
   });
 
-  test('config rungs run after the strategy, in order: parallelization, max_concurrent_agents, named dispatch', () => {
-    const off = { parallelizationEnabled: () => false, maxConcurrentAgents: () => ({ ok: false, value: 'x' }), namedDispatch: () => false };
+  test('config rungs run after the strategy, in order: parallelization, then named dispatch', () => {
+    const off = { parallelizationEnabled: () => false, namedDispatch: () => false };
     assert.equal(planFanOut(input(), deps(off).d).reason, 'parallelization_disabled');
-    assert.equal(planFanOut(input(), deps({ ...off, parallelizationEnabled: () => true }).d).reason, 'invalid_max_concurrent_agents');
     assert.equal(planFanOut(input(), deps({ namedDispatch: () => false }).d).reason, 'no_named_dispatch');
+  });
+
+  test('a 50-worker swarm on a capacity-20 host runs at C = 20', () => {
+    const r = planFanOut(input(), deps({ invokeStrategy: () => ({ ok: true, answer: fanOutPlan(50, { maxWorkers: 50 }) }) }).d);
+    assert.equal(r.mode, 'fan-out');
+    assert.equal(r.concurrency.c, 20);
+    assert.equal(r.dispatches, 51);
+  });
+
+  test('the plan\'s own maxConcurrency throttles C below the host capacity', () => {
+    const r = planFanOut(input(), deps({ invokeStrategy: () => ({ ok: true, answer: fanOutPlan(30, { maxWorkers: 30, maxConcurrency: 5 }) }) }).d);
+    assert.equal(r.concurrency.c, 5);
   });
 
   test('a disabled strategy wins over every config rung, so a user who never opted in sees nothing', () => {
@@ -454,7 +486,7 @@ describe('planFanOut: plan-time ladder', () => {
   });
 
   test('a prior decomposition counts against the agent budget', () => {
-    const full = fanOutPlan(6, { cross: true }); // 8 planned + 1 fallback = 9
+    const full = fanOutPlan(SWARM_DEFAULT, { cross: true }); // 22 planned + 1 fallback = 23 = 20 + 3
     const run = (decomposed) => planFanOut(input({ decomposed }), deps({ invokeStrategy: () => ({ ok: true, answer: full }) }).d);
     assert.equal(run(false).mode, 'fan-out');
     assert.equal(run(true).reason, 'over_agent_budget');
@@ -515,58 +547,6 @@ describe('capability manifest: supportsFanOut and fanOutStrategy', () => {
     assert.ok(!one.some((e) => /fanOutStrategy/.test(e)));
     const two = validateCrossCapability(new Map([[a.id, a], [b.id, b]]), new Set());
     assert.ok(two.some((e) => e === 'fanOutStrategy is declared by both "graphify" and "intel"; at most one capability may declare it'));
-  });
-});
-
-// ─── parallelization.max_concurrent_agents ────────────────────────────────────
-
-describe('readMaxConcurrentAgents', () => {
-  test('absent key and the boolean shorthand resolve to the documented default', () => {
-    const def = { ok: true, value: DEFAULT_MAX_CONCURRENT_AGENTS, source: 'default' };
-    for (const raw of [{}, { parallelization: true }, { parallelization: false }, { parallelization: { enabled: true } }, null]) {
-      assert.deepEqual(readMaxConcurrentAgents(raw), def);
-    }
-    assert.equal(DEFAULT_MAX_CONCURRENT_AGENTS, 3);
-  });
-
-  test('a positive integer is honoured; 0, negatives, fractions, strings and null are reported', () => {
-    assert.deepEqual(readMaxConcurrentAgents({ parallelization: { max_concurrent_agents: 1 } }), { ok: true, value: 1, source: 'config' });
-    for (const v of [0, -1, 2.5, '4', null]) {
-      assert.deepEqual(readMaxConcurrentAgents({ parallelization: { max_concurrent_agents: v } }), { ok: false, reason: 'invalid_max_concurrent_agents', value: v });
-    }
-  });
-});
-
-describe('CLI: config-set parallelization.max_concurrent_agents', () => {
-  let tmp;
-  before(() => { tmp = createTempProject('gsd-fan-out-cfg-'); });
-  after(() => cleanup(tmp));
-  const cfgPath = () => path.join(tmp, '.planning', 'config.json');
-  const readCfg = () => JSON.parse(fs.readFileSync(cfgPath(), 'utf8'));
-
-  test('a positive integer is written and read back', () => {
-    fs.writeFileSync(cfgPath(), '{}');
-    const r = runGsdTools(['config-set', 'parallelization.max_concurrent_agents', '4'], tmp);
-    assert.equal(r.success, true, r.error);
-    assert.equal(readCfg().parallelization.max_concurrent_agents, 4);
-  });
-
-  test('the boolean shorthand survives as parallelization.enabled', () => {
-    for (const enabled of [false, true]) {
-      fs.writeFileSync(cfgPath(), JSON.stringify({ parallelization: enabled }));
-      const r = runGsdTools(['config-set', 'parallelization.max_concurrent_agents', '2'], tmp);
-      assert.equal(r.success, true, r.error);
-      assert.deepEqual(readCfg().parallelization, { enabled, max_concurrent_agents: 2 });
-    }
-  });
-
-  test('0, a negative, a fraction and a string are rejected and nothing is written', () => {
-    for (const bad of ['0', '-1', '2.5', 'many']) {
-      fs.writeFileSync(cfgPath(), '{}');
-      const r = runGsdTools(['config-set', 'parallelization.max_concurrent_agents', bad], tmp);
-      assert.equal(r.success, false, bad);
-      assert.deepEqual(readCfg(), {}, bad);
-    }
   });
 });
 

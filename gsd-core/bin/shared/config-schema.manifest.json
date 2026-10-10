@@ -7,7 +7,6 @@
     "gates.confirm_milestone_scope",
     "granularity",
     "parallelization",
-    "parallelization.max_concurrent_agents",
     "commit_docs",
     "model_profile",
     "search_gitignored",

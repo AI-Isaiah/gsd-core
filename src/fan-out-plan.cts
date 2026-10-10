@@ -13,6 +13,11 @@
  * - `fan-out`: a `workers` stage (2..maxWorkers `worker` dispatches plus at most one
  *   `cross-file` dispatch), then a `synthesize` stage holding exactly one `synthesizer`.
  *
+ * The design point is a swarm (ADR-5273 Decision 2): many weak read-only workers, each looking at
+ * a very small part, in parallel. `maxWorkers` has no upper bound; the strategy reads
+ * `swarm.max_workers` and `swarm.max_concurrency` and writes them into the plan, so core never
+ * reads a swarm-owned key.
+ *
  * Every rejection carries a stable reason code, so the caller can degrade to single-agent
  * dispatch loudly (ADR-5273 Decision 6). Nothing here throws on hostile input.
  */
@@ -22,23 +27,32 @@ import path from 'node:path';
 
 import { tryWithinRootLexical } from './security.cjs';
 
-/** ADR-5273 Decision 2: one role run dispatches at most this many agents, fallback included. */
-export const AGENT_BUDGET = 9;
-
 /** Every role run reserves one dispatch for the loud single-agent fallback. */
 export const RESERVED_FALLBACK_DISPATCHES = 1;
+
+/**
+ * Dispatches a role run spends beyond its workers: the one extra dispatch each role has
+ * (decomposition for research and pattern-mapping, the cross-file worker for code-review), the
+ * synthesizer, and the reserved fallback.
+ */
+export const AGENT_OVERHEAD = 1 + 1 + RESERVED_FALLBACK_DISPATCHES;
+
+/** ADR-5273 Decision 2: one role run dispatches at most `maxWorkers` + 3 agents, fallback included. */
+export function agentBudget(maxWorkers: number): number {
+  return maxWorkers + AGENT_OVERHEAD;
+}
 
 /** The one read-only worker agent a fan-out plan may dispatch besides the step's own agent. */
 export const FAN_OUT_WORKER_AGENT = 'gsd-swarm-worker';
 
-/**
- * Bounds on a plan's declared `maxWorkers`. The ceiling is derived from the budget, not chosen:
- * 9 total, minus the synthesizer, minus the reserved fallback, minus the one extra dispatch each
- * role spends (decomposition for research and pattern-mapping, the cross-file worker for
- * code-review) leaves 6.
- */
+/** A fan-out needs at least two workers. There is deliberately no maximum (ADR-5273 Decision 2). */
 export const MIN_WORKERS = 2;
-export const MAX_WORKERS = AGENT_BUDGET - 1 - RESERVED_FALLBACK_DISPATCHES - 1;
+
+/**
+ * ADR-5273 Decision 9: the executor drops (never truncates) a worker answer larger than this before
+ * it reaches the synthesizer, so the synthesis input grows by at most maxWorkers × 4 KiB.
+ */
+export const ANSWER_MAX_BYTES = 4 * 1024;
 
 /** Byte bounds on model-bound text a plan carries (ADR-5273 Decision 9). */
 export const PROMPT_MAX_BYTES = 32 * 1024;
@@ -54,7 +68,6 @@ export const FAN_OUT_REASON = Object.freeze({
   NO_STRATEGY: 'no_strategy',
   STRATEGY_FAILED: 'strategy_failed',
   PARALLELIZATION_DISABLED: 'parallelization_disabled',
-  INVALID_MAX_CONCURRENT_AGENTS: 'invalid_max_concurrent_agents',
   NO_NAMED_DISPATCH: 'no_named_dispatch',
   NO_CONCURRENCY: 'no_concurrency',
   INVALID_PLAN: 'invalid_plan',
@@ -76,7 +89,7 @@ export type DispatchPurpose = (typeof DISPATCH_PURPOSES)[number];
  */
 export const EXECUTOR_ONLY_FIELDS = Object.freeze(['isolation', 'worktree_metadata', 'resultContract'] as const);
 
-const PLAN_KEYS = new Set(['mode', 'stage', 'maxWorkers', 'stages']);
+const PLAN_KEYS = new Set(['mode', 'stage', 'maxWorkers', 'maxConcurrency', 'stages']);
 const STAGE_KEYS = new Set(['id', 'dispatches']);
 const DISPATCH_KEYS = new Set(['purpose', 'agentType', 'model', 'tier', 'prompt', 'schema', 'scope']);
 
@@ -106,6 +119,7 @@ export interface FanOutPlan {
   mode: 'fan-out';
   stage: FanOutStage;
   maxWorkers: number;
+  maxConcurrency: number;
   stages: FanOutPlanStage[];
 }
 
@@ -132,14 +146,6 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 
 function byteLength(s: string): number {
   return Buffer.byteLength(s, 'utf8');
-}
-
-function describeValue(v: unknown): string {
-  try {
-    return JSON.stringify(v) ?? String(v);
-  } catch {
-    return typeof v;
-  }
 }
 
 function invalid(detail: string): { ok: false; reason: FanOutReason; detail: string } {
@@ -292,8 +298,12 @@ export function validateFanOutPlan(plan: unknown, ctx: ValidateFanOutPlanContext
   if (plan['mode'] !== 'fan-out') return invalid('plan.mode is not "fan-out"');
   if (plan['stage'] !== ctx.stage) return invalid(`plan.stage is not "${ctx.stage}"`);
   const maxWorkers = plan['maxWorkers'];
-  if (typeof maxWorkers !== 'number' || !Number.isInteger(maxWorkers) || maxWorkers < MIN_WORKERS || maxWorkers > MAX_WORKERS) {
-    return invalid(`plan.maxWorkers is not an integer in ${MIN_WORKERS}..${MAX_WORKERS}`);
+  if (typeof maxWorkers !== 'number' || !Number.isSafeInteger(maxWorkers) || maxWorkers < MIN_WORKERS) {
+    return invalid(`plan.maxWorkers is not an integer of at least ${MIN_WORKERS}`);
+  }
+  const maxConcurrency = plan['maxConcurrency'];
+  if (typeof maxConcurrency !== 'number' || !Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1) {
+    return invalid('plan.maxConcurrency is not an integer of at least 1');
   }
   const rawStages = plan['stages'];
   if (!Array.isArray(rawStages)) return invalid('plan.stages is not an array');
@@ -327,15 +337,16 @@ export function validateFanOutPlan(plan: unknown, ctx: ValidateFanOutPlanContext
   const prior = Number.isSafeInteger(ctx.priorDispatches) && (ctx.priorDispatches as number) > 0 ? (ctx.priorDispatches as number) : 0;
   const dispatches = stages.reduce((n, st) => n + st.dispatches.length, 0);
   const total = prior + dispatches + RESERVED_FALLBACK_DISPATCHES;
-  if (total > AGENT_BUDGET) {
+  const budget = agentBudget(maxWorkers);
+  if (total > budget) {
     return {
       ok: false,
       reason: FAN_OUT_REASON.OVER_AGENT_BUDGET,
-      detail: `${prior} prior + ${dispatches} planned + ${RESERVED_FALLBACK_DISPATCHES} reserved fallback = ${total} > ${AGENT_BUDGET}`,
+      detail: `${prior} prior + ${dispatches} planned + ${RESERVED_FALLBACK_DISPATCHES} reserved fallback = ${total} > maxWorkers ${maxWorkers} + ${AGENT_OVERHEAD} = ${budget}`,
     };
   }
 
-  return { ok: true, plan: { mode: 'fan-out', stage: ctx.stage, maxWorkers, stages }, dispatches };
+  return { ok: true, plan: { mode: 'fan-out', stage: ctx.stage, maxWorkers, maxConcurrency, stages }, dispatches };
 }
 
 /** A strategy's quiet or loud refusal: `{ "mode": "single", "reason": "<code>" }`. */
@@ -348,37 +359,29 @@ export function readStrategySingle(answer: unknown): { reason: string } | null {
 export interface ConcurrencyInput {
   /** `dispatch-capacity`'s resolved value for this runtime. */
   dispatchCapacity: number;
-  /** `readMaxConcurrentAgents` (src/config.cts) over the project's config.json. */
-  maxConcurrentAgents: { ok: true; value: number } | { ok: false; value: unknown };
+  /** The validated plan's `maxConcurrency` (the strategy's `swarm.max_concurrency`). */
+  maxConcurrency: number;
   /** The validated plan's `maxWorkers`. */
   maxWorkers: number;
 }
 
 export type ConcurrencyResult =
-  | { ok: true; c: number; terms: { dispatchCapacity: number; maxConcurrentAgents: number; maxWorkers: number } }
+  | { ok: true; c: number; terms: { dispatchCapacity: number; maxConcurrency: number; maxWorkers: number } }
   | { ok: false; reason: FanOutReason; detail: string };
 
 /**
- * ADR-5273 Decision 2: C = min(dispatch-capacity, parallelization.max_concurrent_agents,
- * maxWorkers). An invalid configured value fails closed rather than clamping, and a C below 2
- * cannot fan out at all.
+ * ADR-5273 Decision 2: C = min(dispatch-capacity, maxConcurrency, maxWorkers). Workers run in waves
+ * of at most C per message. A C below 2 cannot fan out at all.
  */
 export function resolveConcurrency(input: ConcurrencyInput): ConcurrencyResult {
-  if (!input.maxConcurrentAgents.ok) {
-    return {
-      ok: false,
-      reason: FAN_OUT_REASON.INVALID_MAX_CONCURRENT_AGENTS,
-      detail: `parallelization.max_concurrent_agents is ${describeValue(input.maxConcurrentAgents.value)}, not a positive integer`,
-    };
-  }
   const cap = Number.isSafeInteger(input.dispatchCapacity) && input.dispatchCapacity > 0 ? input.dispatchCapacity : 1;
-  const terms = { dispatchCapacity: cap, maxConcurrentAgents: input.maxConcurrentAgents.value, maxWorkers: input.maxWorkers };
-  const c = Math.min(terms.dispatchCapacity, terms.maxConcurrentAgents, terms.maxWorkers);
+  const terms = { dispatchCapacity: cap, maxConcurrency: input.maxConcurrency, maxWorkers: input.maxWorkers };
+  const c = Math.min(terms.dispatchCapacity, terms.maxConcurrency, terms.maxWorkers);
   if (!(c >= 2)) {
     return {
       ok: false,
       reason: FAN_OUT_REASON.NO_CONCURRENCY,
-      detail: `C = min(dispatch-capacity ${terms.dispatchCapacity}, max_concurrent_agents ${terms.maxConcurrentAgents}, maxWorkers ${terms.maxWorkers}) = ${c}`,
+      detail: `C = min(dispatch-capacity ${terms.dispatchCapacity}, maxConcurrency ${terms.maxConcurrency}, maxWorkers ${terms.maxWorkers}) = ${c}`,
     };
   }
   return { ok: true, c, terms };
@@ -416,7 +419,6 @@ export interface PlanFanOutDeps {
   /** Run the strategy's command; returns its parsed JSON answer or a failure detail. */
   invokeStrategy: (strategy: FanOutStrategyRef) => { ok: true; answer: unknown } | { ok: false; detail: string };
   parallelizationEnabled: () => boolean;
-  maxConcurrentAgents: () => { ok: true; value: number } | { ok: false; value: unknown };
   namedDispatch: () => boolean;
   dispatchCapacity: () => { capacity: number; source: string; reason: string };
   resolveModel: (agentType: string) => ResolvedModel | null;
@@ -430,7 +432,8 @@ export type PlanFanOutResult =
       plan: FanOutPlan;
       dispatches: number;
       reservedFallback: number;
-      concurrency: { c: number; terms: { dispatchCapacity: number; maxConcurrentAgents: number; maxWorkers: number }; capacitySource: string; capacityReason: string };
+      concurrency: { c: number; terms: { dispatchCapacity: number; maxConcurrency: number; maxWorkers: number }; capacitySource: string; capacityReason: string };
+      answerMaxBytes: number;
     }
   | { mode: 'single'; reason: string; loud: boolean; detail?: string; strategy?: FanOutStrategyRef };
 
@@ -450,10 +453,10 @@ function single(reason: string, detail?: string, strategy?: FanOutStrategyRef): 
  *
  * 1. the step's `supportsFanOut` trait (quiet), 2. exactly one active strategy (none is quiet),
  * 3. the strategy's own answer (its `disabled` / `role_not_selected` are quiet), 4. the boolean
- * `parallelization`, 5. `parallelization.max_concurrent_agents`, 6. named dispatch, 7. plan
- * validation, 8. C >= 2.
+ * `parallelization`, 5. named dispatch, 6. plan validation, 7. C >= 2.
  *
- * Plan validation runs before C because C's third term is the plan's own `maxWorkers`. The
+ * Plan validation runs before C because two of C's terms are the plan's own `maxConcurrency` and
+ * `maxWorkers`. The
  * strategy runs before the config rungs so a user who never enabled the strategy sees nothing.
  */
 export function planFanOut(input: PlanFanOutInput, deps: PlanFanOutDeps): PlanFanOutResult {
@@ -471,10 +474,6 @@ export function planFanOut(input: PlanFanOutInput, deps: PlanFanOutDeps): PlanFa
   if (declined) return single(declined.reason, undefined, strategy);
 
   if (!deps.parallelizationEnabled()) return single(FAN_OUT_REASON.PARALLELIZATION_DISABLED, undefined, strategy);
-  const mca = deps.maxConcurrentAgents();
-  if (!mca.ok) {
-    return single(FAN_OUT_REASON.INVALID_MAX_CONCURRENT_AGENTS, `parallelization.max_concurrent_agents is ${describeValue(mca.value)}, not a positive integer`, strategy);
-  }
   if (!deps.namedDispatch()) return single(FAN_OUT_REASON.NO_NAMED_DISPATCH, undefined, strategy);
 
   const validated = validateFanOutPlan(invoked.answer, {
@@ -487,7 +486,7 @@ export function planFanOut(input: PlanFanOutInput, deps: PlanFanOutDeps): PlanFa
   if (!validated.ok) return single(validated.reason, validated.detail, strategy);
 
   const cap = deps.dispatchCapacity();
-  const conc = resolveConcurrency({ dispatchCapacity: cap.capacity, maxConcurrentAgents: mca, maxWorkers: validated.plan.maxWorkers });
+  const conc = resolveConcurrency({ dispatchCapacity: cap.capacity, maxConcurrency: validated.plan.maxConcurrency, maxWorkers: validated.plan.maxWorkers });
   if (!conc.ok) return single(conc.reason, `${conc.detail} (dispatch-capacity source ${cap.source}, reason ${cap.reason})`, strategy);
 
   return {
@@ -498,5 +497,6 @@ export function planFanOut(input: PlanFanOutInput, deps: PlanFanOutDeps): PlanFa
     dispatches: validated.dispatches,
     reservedFallback: RESERVED_FALLBACK_DISPATCHES,
     concurrency: { c: conc.c, terms: conc.terms, capacitySource: cap.source, capacityReason: cap.reason },
+    answerMaxBytes: ANSWER_MAX_BYTES,
   };
 }
