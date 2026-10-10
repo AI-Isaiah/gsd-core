@@ -593,6 +593,7 @@
       "state-transition.cjs",
       "state.cjs",
       "surface.cjs",
+      "swarm-anchors.cjs",
       "swarm-command-router.cjs",
       "swarm.cjs",
       "task-command-router.cjs",

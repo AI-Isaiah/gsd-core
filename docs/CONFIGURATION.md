@@ -1187,6 +1187,20 @@ gsd-tools query config-set features.thinking_partner false
 
 The `features.*` namespace is a dynamic key pattern — new feature flags can be added without modifying `VALID_CONFIG_KEYS`. Any key matching `features.<name>` is accepted by the config system.
 
+
+<a id="swarm-settings"></a>
+### Swarm Settings
+
+Owned by the default-off, BETA `swarm` capability (#5273, [ADR-5273](adr/5273-swarm-fan-out-capability.md)). With `swarm.enabled` on, research, pattern-mapping and code review fan out to many read-only Haiku-class `gsd-swarm-worker` agents, each looking at a very small part of the codebase in parallel, and the step's own agent synthesizes their answers into the unchanged artefact. See [Enable swarm fan-out](how-to/enable-swarm-fan-out.md).
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `swarm.enabled` | boolean | `false` | Master toggle. When `false`, every step dispatches its single agent exactly as before and no `SWARM.json` is written. |
+| `swarm.roles` | string | `researcher,pattern-mapper,code-reviewer` | Comma-separated roles that fan out. A role left out runs single-agent, silently. |
+| `swarm.max_workers` | number | `20` | Most worker units per role run. Integer, at least `2`, **no upper bound**. A run dispatches at most `max_workers + 3` agents, and the synthesizer reads at most `max_workers` × 4 KiB of answers, so a very large value can exceed the synthesizer's context; that run then falls back to single-agent. |
+| `swarm.max_concurrency` | number | `20` | Most workers per wave. Integer, at least `1`. Effective concurrency is min(`dispatch-capacity`, `swarm.max_concurrency`, `swarm.max_workers`); below `2` the role runs single-agent with reason `no_concurrency`. `parallelization.max_concurrent_agents` plays no part. |
+
+The worker model is the catalog row `gsd-swarm-worker` (`haiku` in every profile). Change it with `model_overrides.gsd-swarm-worker`, for example to pin a specific Haiku release.
 ---
 
 ## Capability Overlay (installed third-party capabilities)

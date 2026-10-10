@@ -213,6 +213,7 @@ module.exports = {
   "tests/state-transition.test.cjs",
   "tests/state.platform.test.cjs",
   "tests/state.test.cjs",
+  "tests/swarm-anchors.test.cjs",
   "tests/todos-workstream-scope.test.cjs",
   "tests/tracer-bullet.test.cjs",
   "tests/uat-complete-session.test.cjs",

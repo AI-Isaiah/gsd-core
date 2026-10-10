@@ -351,6 +351,7 @@ build/
 /gsd-core/bin/lib/fan-out-plan.cjs
 /gsd-core/bin/lib/swarm.cjs
 /gsd-core/bin/lib/swarm-command-router.cjs
+/gsd-core/bin/lib/swarm-anchors.cjs
 __pycache__/
 *.pyc
 .venv/

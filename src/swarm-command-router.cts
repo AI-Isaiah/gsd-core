@@ -42,6 +42,8 @@ import {
 import type { Unit, RawAnswer } from './swarm.cjs';
 import { FAN_OUT_WORKER_AGENT, checkWorkerAnswer } from './fan-out-plan.cjs';
 import { retryRenameSync } from './shell-command-projection.cjs';
+import { kindForArtefact, pruneArtefact, verifyAnchors } from './swarm-anchors.cjs';
+import type { ArtefactKind } from './swarm-anchors.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseLocatorMod = require('./phase-locator.cjs');
 import type { ResolvedModel } from './fan-out-plan.cjs';
@@ -254,16 +256,65 @@ function handleRecord(opts: RouteSwarmCommandOptions): unknown {
   return undefined;
 }
 
+/**
+ * `swarm verify-anchors <artefact> [--prune] [--kind research|patterns|review]` (ADR-5273
+ * Decision 3). Without `--prune` it only reports. With `--prune` it removes each failing anchor's
+ * claim unit, rewrites the artefact atomically, and lists the removals; a prune that cannot be done
+ * cleanly answers `anchor_check_failed` and leaves the file untouched. Never prints file content.
+ */
+function handleVerifyAnchors(opts: RouteSwarmCommandOptions): unknown {
+  const { args, cwd, raw } = opts;
+  const usage = 'Usage: gsd-tools swarm verify-anchors <artefact> [--prune] [--kind research|patterns|review]';
+  const target = args[2];
+  if (!target || target.startsWith('--')) return makeInvalidArgs('artefact', usage, ERROR_REASON.USAGE);
+  const abs = path.resolve(cwd, target);
+  const rel = path.relative(cwd, abs);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return makeInvalidArgs('artefact', `${target} is outside the project root`, ERROR_REASON.USAGE);
+  const kindArg = flagValue(args, '--kind');
+  const kind = (kindArg || kindForArtefact(abs)) as ArtefactKind | null;
+  if (kind !== 'research' && kind !== 'patterns' && kind !== 'review') {
+    return makeInvalidArgs('kind', `cannot tell the artefact kind of ${target}; pass --kind. ${usage}`, ERROR_REASON.USAGE);
+  }
+  const file = readBoundedFile(abs);
+  if (!file.ok) return makeInvalidArgs('artefact', file.detail, ERROR_REASON.USAGE);
+
+  if (!args.includes('--prune')) {
+    const v = verifyAnchors(file.text, cwd);
+    const failed = v.tooMany || v.failures.length > 0;
+    output({ verdict: failed ? 'anchor_check_failed' : 'ok', total: v.total, failures: v.failures, ...(v.tooMany ? { reason: 'too_many_anchors' } : {}) }, raw);
+    return undefined;
+  }
+
+  const r = pruneArtefact(file.text, kind, cwd);
+  if (r.verdict === 'ok' && r.pruned.length > 0) {
+    const tmp = `${abs}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, r.text, 'utf8');
+    try {
+      retryRenameSync(tmp, abs);
+    } catch (err) {
+      try { fs.unlinkSync(tmp); } catch { /* best-effort cleanup */ }
+      throw err;
+    }
+  }
+  if (r.verdict === 'ok') {
+    output({ verdict: 'ok', total: r.total, pruned: r.pruned, written: r.pruned.length > 0 }, raw);
+  } else {
+    output({ verdict: r.verdict, reason: r.reason, total: r.total, failures: r.failures, written: false }, raw);
+  }
+  return undefined;
+}
+
 function routeSwarmCommand(opts: RouteSwarmCommandOptions): void {
   const { args, cwd, raw, error } = opts;
   routeHubCommandFamily({
     family: 'swarm',
     args,
-    subcommands: ['check-answers', 'plan', 'record'],
+    subcommands: ['check-answers', 'plan', 'record', 'verify-anchors'],
     handlers: {
       'check-answers': () => handleCheckAnswers(opts),
       plan: () => handlePlan(opts),
       record: () => handleRecord(opts),
+      'verify-anchors': () => handleVerifyAnchors(opts),
     },
     unknownMessage: (_subcommand: string, available: string[]) =>
       `Unknown swarm subcommand. Available: ${available.join(', ')}`,
