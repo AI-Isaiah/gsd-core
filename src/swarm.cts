@@ -214,7 +214,12 @@ export const DECOMPOSE_SCHEMA = Object.freeze({
   },
 });
 
-function workerPrompt(task: string, scope: readonly string[]): string {
+/** The schema travels in the prompt: `Agent()` has no schema channel, so the worker must read it. */
+function schemaBlock(schema: object): string[] {
+  return ['<schema>', JSON.stringify(schema), '</schema>'];
+}
+
+function workerPrompt(task: string, scope: readonly string[], schema: object): string {
   return [
     '<task>',
     task,
@@ -222,7 +227,8 @@ function workerPrompt(task: string, scope: readonly string[]): string {
     '<scope>',
     ...scope,
     '</scope>',
-    `Answer with one JSON object matching the schema in this dispatch, under ${ANSWER_MAX_BYTES} bytes. Cite every claim with path, lines and a verbatim quote, or return not_found.`,
+    ...schemaBlock(schema),
+    `Answer with one JSON object matching <schema>, under ${ANSWER_MAX_BYTES} bytes. Cite every claim with path, lines and a verbatim quote, or return not_found.`,
   ].join('\n');
 }
 
@@ -232,7 +238,7 @@ const ROLE_ARTEFACT: Readonly<Record<SwarmRole, string>> = Object.freeze({
   'code-reviewer': 'REVIEW.md',
 });
 
-function decomposePrompt(role: SwarmRole, phase: string, maxWorkers: number): string {
+function decomposePrompt(role: SwarmRole, phase: string, maxWorkers: number, inputs: readonly string[]): string {
   const what = role === 'researcher'
     ? 'the research this phase needs before planning'
     : 'the analog lookups this phase needs: for each file to be created or modified, its closest existing analog and the excerpts to copy';
@@ -240,10 +246,14 @@ function decomposePrompt(role: SwarmRole, phase: string, maxWorkers: number): st
     '<task>',
     `Split ${what} for phase ${phase} into the smallest independent questions a weak, read-only worker can answer by reading one to three files.`,
     `Aim to use all ${maxWorkers} units: many very small units are the design point, one broad unit is a failure. Never return more than ${maxWorkers}.`,
-    'Read the phase CONTEXT.md (and RESEARCH.md when it exists) to know what is needed. Give each unit a precise question and the exact repository-relative file paths to read as its scope. Use only paths that exist.',
+    inputs.length > 0
+      ? `Read these phase inputs first to know what is needed: ${inputs.join(', ')}.`
+      : 'Read the phase CONTEXT.md (and RESEARCH.md when it exists) to know what is needed.',
+    'Give each unit a precise question and the exact repository-relative file paths to read as its scope. Use only paths that exist.',
     'Do not answer the questions yourself.',
     '</task>',
-    'Return one JSON object: { "units": [ { "question": string, "scope": [path, ...] } ] }.',
+    ...schemaBlock(DECOMPOSE_SCHEMA),
+    'Return one JSON object matching <schema>: { "units": [ { "question": string, "scope": [path, ...] } ] }.',
   ].join('\n');
 }
 
@@ -290,6 +300,8 @@ export interface PlanInput {
   files?: string[];
   /** Project root; review files that fail core's containment (e.g. deleted in the diff) are skipped. */
   projectRoot: string;
+  /** Repo-relative phase inputs the decomposition reads (CONTEXT.md, RESEARCH.md), when they exist. */
+  phaseInputs?: string[];
 }
 
 function dispatch(purpose: FanOutDispatch['purpose'], agentType: string, m: ResolvedModel, prompt: string, schema: object | null, scope?: string[]): FanOutDispatch {
@@ -319,7 +331,7 @@ export function buildSwarmPlan(input: PlanInput): FanOutPlan | Single {
     if (role === 'code-reviewer') return single(SWARM_REASON.INVALID_UNITS, 'code review needs no decomposition; call --stage fan-out with --scope-file');
     return {
       ...base,
-      stages: [{ id: 'decompose', dispatches: [dispatch('decompose', FAN_OUT_WORKER_AGENT, input.step, decomposePrompt(role, input.phase, config.maxWorkers), DECOMPOSE_SCHEMA)] }],
+      stages: [{ id: 'decompose', dispatches: [dispatch('decompose', FAN_OUT_WORKER_AGENT, input.step, decomposePrompt(role, input.phase, config.maxWorkers, input.phaseInputs ?? []), DECOMPOSE_SCHEMA)] }],
     };
   }
 
@@ -336,20 +348,20 @@ export function buildSwarmPlan(input: PlanInput): FanOutPlan | Single {
     const groups = groupReviewFiles(files, config.maxWorkers);
     workers = groups.map((g) => dispatch(
       'worker', FAN_OUT_WORKER_AGENT, input.worker,
-      workerPrompt('Review these files for defects: bugs, security issues and code-quality problems. Report each finding with its severity, the exact lines and a verbatim quote. Report only what the quoted lines show.', g),
+      workerPrompt('Review these files for defects: bugs, security issues and code-quality problems. Report each finding with its severity, the exact lines and a verbatim quote. Report only what the quoted lines show.', g, REVIEW_ANSWER_SCHEMA),
       REVIEW_ANSWER_SCHEMA, g,
     ));
     const all = files;
     crossFile = [dispatch(
       'cross-file', FAN_OUT_WORKER_AGENT, input.step,
-      workerPrompt('Find defects that span more than one of these files: broken contracts between caller and callee, inconsistent assumptions, data flowing unchecked across a boundary. Ignore defects local to one file; other workers cover them.', all),
+      workerPrompt('Find defects that span more than one of these files: broken contracts between caller and callee, inconsistent assumptions, data flowing unchecked across a boundary. Ignore defects local to one file; other workers cover them.', all, REVIEW_ANSWER_SCHEMA),
       REVIEW_ANSWER_SCHEMA, all,
     )];
   } else {
     const units = input.units ?? [];
     if (units.length > config.maxWorkers) return single(SWARM_REASON.TOO_MANY_UNITS, `${units.length} units, more than swarm.max_workers ${config.maxWorkers}`);
     if (units.length < MIN_WORKERS) return single(SWARM_REASON.TOO_FEW_UNITS, `${units.length} valid unit(s)`);
-    workers = units.map((u) => dispatch('worker', FAN_OUT_WORKER_AGENT, input.worker, workerPrompt(u.question, u.scope), WORKER_ANSWER_SCHEMA, u.scope));
+    workers = units.map((u) => dispatch('worker', FAN_OUT_WORKER_AGENT, input.worker, workerPrompt(u.question, u.scope, WORKER_ANSWER_SCHEMA), WORKER_ANSWER_SCHEMA, u.scope));
   }
 
   return {

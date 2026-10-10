@@ -74,10 +74,10 @@ describe('checkAnchor: each source check returns its own reason', () => {
     assert.equal(normalizeForMatch('a\r\n  b\tc '), 'a b c');
   });
 
-  test('bounds: the last line holds, one past it is out_of_range', () => {
-    assert.equal(at('src/a.ts', '4', ''), 'empty_quote'); // file has 4 lines incl. trailing empty one
+  test('bounds: the last line holds, one past it is out_of_range (a trailing newline adds no line)', () => {
     assert.equal(at('src/a.ts', '3', '}'), null);
-    assert.equal(at('src/a.ts', '5', '}'), 'out_of_range');
+    assert.equal(at('src/a.ts', '4', '}'), 'out_of_range');
+    assert.equal(at('src/a.ts', '3', ''), 'empty_quote');
   });
 
   test('a quote from another line, a bad range, and hostile paths each fail by name', () => {

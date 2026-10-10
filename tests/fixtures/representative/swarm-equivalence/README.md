@@ -43,9 +43,12 @@ host-reported; an estimate in the evidence fails ADR-5273 Decision 5.
 
 ### The negative fixture — a real fabricated anchor
 
-From run B, keep the raw text of worker answers as they came back. Find one whose quote does not
-match its cited lines (Haiku-class workers produce these; that is the point of the check) and save
-it verbatim as `fabricated-worker-answer.json`. Do not edit it, and do not write one by hand: a
+The raw worker answers exist on disk only as the `--answers` file the spawn site hands to
+`gsd-tools swarm check-answers`. ADR-5273 step 4 makes the spawn site write that file into the
+phase directory (`<NN>-SWARM-ANSWERS-<role>.json`), so it survives the run; until step 4 lands there
+is nothing to copy. From run B, find one answer in that file whose quote does not match its cited
+lines (Haiku-class workers produce these; that is the point of the check) and save that entry
+verbatim as `fabricated-worker-answer.json`. Do not edit it, and do not write one by hand: a
 fabricated anchor written by the gate's author tests the author's idea of a mistake, not the
 model's.
 

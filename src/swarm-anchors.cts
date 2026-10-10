@@ -121,6 +121,8 @@ export function checkAnchor(a: Anchor, projectRoot: string, read: ReadSource = d
   const src = read(path.resolve(projectRoot, a.path));
   if (src === null) return 'unreadable';
   const fileLines = src.replace(/\r\n?/g, '\n').split('\n');
+  // A trailing newline ends the last line; it does not start a phantom line N+1.
+  if (fileLines.length > 1 && fileLines[fileLines.length - 1] === '') fileLines.pop();
   if (end > fileLines.length) return 'out_of_range';
   const quote = normalizeForMatch(a.quote);
   if (quote.length === 0) return 'empty_quote';

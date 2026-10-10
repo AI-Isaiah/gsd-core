@@ -991,6 +991,7 @@ describe('refactor-trigger: loop wiring', () => {
       consumes: ['SUMMARY.md'],
       onError: 'skip',
       supportsReviewerLanes: true,
+      supportsFanOut: true,
     });
   });
 

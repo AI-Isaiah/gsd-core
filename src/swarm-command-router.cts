@@ -186,7 +186,17 @@ function handlePlan(opts: RouteSwarmCommandOptions): unknown {
     files = parseScopeFile(file.text);
   }
 
-  output(buildSwarmPlan({ stage, role, stepAgent: agent, phase, config: cfg.config, worker, step, units, files, projectRoot: cwd }), raw);
+  // The decomposition reads the phase's own inputs; name the ones that exist so it never guesses.
+  const phaseInputs: string[] = [];
+  const found = findPhaseInternal(cwd, phase);
+  if (found && found.found === true) {
+    for (const name of ['CONTEXT.md', 'RESEARCH.md']) {
+      const rel = path.join(found.directory, `${found.phase_number}-${name}`);
+      if (fs.existsSync(path.join(cwd, rel))) phaseInputs.push(rel.split(path.sep).join('/'));
+    }
+  }
+
+  output(buildSwarmPlan({ stage, role, stepAgent: agent, phase, config: cfg.config, worker, step, units, files, projectRoot: cwd, phaseInputs }), raw);
   return undefined;
 }
 

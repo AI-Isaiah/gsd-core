@@ -228,6 +228,7 @@ describe('buildSwarmPlan: every plan it emits passes core validation', () => {
     const d = p.stages[0].dispatches[0];
     assert.deepEqual([d.purpose, d.agentType, d.model], ['decompose', FAN_OUT_WORKER_AGENT, 'sonnet']);
     assert.match(d.prompt, /Aim to use all 40 units/);
+    assert.ok(d.prompt.includes('<schema>'));
   });
 
   test('research fan-out after decomposition: one worker per unit, fits the budget with the prior dispatch', () => {
@@ -236,6 +237,10 @@ describe('buildSwarmPlan: every plan it emits passes core validation', () => {
     assert.equal(coreVerdict(p, 'fan-out', 'gsd-phase-researcher', 1), 'ok');
     assert.equal(p.stages[0].dispatches.length, 20);
     assert.match(p.stages[0].dispatches[0].prompt, /<task>\nWhere is v0\?\n<\/task>/);
+    // Agent() has no schema channel: the worker can only follow the schema its prompt carries.
+    const prompt = p.stages[0].dispatches[0].prompt;
+    const schemaInPrompt = JSON.parse(prompt.split('<schema>\n')[1].split('\n</schema>')[0]);
+    assert.deepEqual(schemaInPrompt, p.stages[0].dispatches[0].schema);
   });
 
   test('pattern-mapping synthesizes with gsd-pattern-mapper and names PATTERNS.md', () => {
@@ -394,11 +399,15 @@ describe('CLI: loop fan-out-plan through the swarm strategy', () => {
     assert.deepEqual([run(review).reason, run(review).loud], ['role_not_selected', false]);
   });
 
-  test('research decompose returns a one-dispatch plan on the researcher model', () => {
+  test('research decompose returns a one-dispatch plan on the researcher model, naming the phase CONTEXT.md', () => {
     setConfig({ swarm: { enabled: true } });
+    const phaseDir = path.join(tmp, '.planning', 'phases', '01-demo');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    fs.writeFileSync(path.join(phaseDir, '01-CONTEXT.md'), '# Context\n');
     const r = run(['--cap-id', 'research', '--point', 'plan:pre', '--agent', 'gsd-phase-researcher', '--phase', '1', '--stage', 'decompose']);
     assert.equal(r.mode, 'fan-out', JSON.stringify(r));
     assert.deepEqual(r.plan.stages.map((s) => s.dispatches.map((d) => d.purpose)), [['decompose']]);
+    assert.ok(r.plan.stages[0].dispatches[0].prompt.includes('.planning/phases/01-demo/01-CONTEXT.md'));
   });
 
   test('research fan-out reads the decomposition from --units and books it against the budget', () => {
