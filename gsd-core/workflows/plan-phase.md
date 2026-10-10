@@ -403,6 +403,8 @@ fi
 
 Find the active `research` step hook in `PLAN_PRE_HOOKS_JSON`. Use the hook's `fragment.inline` as the prompt template and substitute the phase fields below before spawning its declared `ref.agent`.
 
+If the hook has `supportsFanOut`, first follow `gsd-core/references/fan-out-dispatch.md` (research row); it says when the spawn below still runs.
+
 ```markdown
 {research_hook.fragment.inline}
 ```
@@ -671,6 +673,8 @@ Display banner:
 ```
 
 Use the active `pattern-mapper` hook's `fragment.inline` as the prompt template and substitute the phase fields below before spawning its declared `ref.agent`.
+
+Fan-out: as in step 5, pattern-mapping row.
 
 ```markdown
 {pattern_mapper_hook.fragment.inline}

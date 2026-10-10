@@ -319,6 +319,7 @@
   "gsd-core/workflows/code-review.md",
   "gsd-core/workflows/code-review/steps/dispatch-fix.md",
   "gsd-core/workflows/code-review/steps/structural-pre-pass.md",
+  "gsd-core/workflows/code-review/steps/swarm-fan-out.md",
   "gsd-core/workflows/complete-milestone.md",
   "gsd-core/workflows/complete-milestone/detail/elaboration.md",
   "gsd-core/workflows/complete-milestone/steps/git-tag.md",

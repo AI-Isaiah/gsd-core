@@ -750,6 +750,8 @@ if [ -n "$FALLOW_JSON_PATH" ] && [ -f "$FALLOW_JSON_PATH" ]; then
 fi
 ```
 
+Swarm (#5273): read and execute `gsd-core/workflows/code-review/steps/swarm-fan-out.md` first; a `single` verdict leaves the spawn below unchanged.
+
 Spawn the gsd-code-reviewer agent:
 
 Print: `◆ Spawning code reviewer... (runs in a subagent — no output until it returns, ~1–5 min; expected, not a freeze)`

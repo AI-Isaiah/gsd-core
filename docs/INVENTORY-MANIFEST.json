@@ -686,6 +686,7 @@
       "autonomous/steps/converge-loop.md",
       "code-review/steps/dispatch-fix.md",
       "code-review/steps/structural-pre-pass.md",
+      "code-review/steps/swarm-fan-out.md",
       "complete-milestone/steps/git-tag.md",
       "discuss-phase-assumptions/steps/auto-advance-dispatch.md",
       "docs-update/steps/dispatch-monorepo-packages.md",

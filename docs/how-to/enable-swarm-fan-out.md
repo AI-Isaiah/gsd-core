@@ -6,10 +6,10 @@ the codebase, in parallel, and the step's own agent synthesizes their answers in
 `RESEARCH.md`, `PATTERNS.md` or `REVIEW.md` it always writes.
 
 > **Default-off and BETA.** The design and its trade-offs are in
-> [ADR-5273](../adr/5273-swarm-fan-out-capability.md). The workflow spawn sites that call the
-> fan-out are wired in a later step of that ADR; until then, enabling the capability makes the
-> `gsd_run swarm` and `gsd_run loop fan-out-plan` commands answer with fan-out plans, but
-> `/gsd-plan-phase` and `/gsd-code-review` still dispatch their single agent.
+> [ADR-5273](../adr/5273-swarm-fan-out-capability.md). `/gsd-plan-phase` (research and pattern
+> mapping) and `/gsd-code-review` ask for a fan-out plan before they spawn their agent and follow
+> `gsd-core/references/fan-out-dispatch.md` when they get one. With the capability off they
+> behave exactly as before.
 
 **What you need:**
 
@@ -66,6 +66,8 @@ names the reason (`disabled`, `role_not_selected`, `no_concurrency`, `no_worker_
   evidence did not hold. In `REVIEW.md` the finding counts and status are recomputed after removal.
 - `<phase dir>/<NN>-SWARM.json`, one entry per role run, with the token split by model. Host-reported
   figures and chars/4 estimates sit in separate maps and are never summed.
+- `<phase dir>/<NN>-SWARM-ANSWERS-<role>.json`, the raw worker answers exactly as they came back,
+  for audit. Both files are committed when `commit_docs` is on.
 
 ## When it falls back
 

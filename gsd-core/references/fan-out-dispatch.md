@@ -94,6 +94,82 @@ run-time rungs are:
 An anchor the check *can* prune is not a miss: its claim is removed, the removal is reported
 loudly and listed in the artefact, and the swarm artefact stands.
 
+## Executor procedure
+
+The steps a spawn site runs, in order. A site names its `--cap-id`, its `--point`, its `--agent`
+and its artefact path; everything else is here. `swarm` is the one strategy today, so the
+post-steps below are its commands (`gsd_run swarm …`). `<role>` is the swarm role of `--agent`:
+`researcher`, `pattern-mapper` or `code-reviewer`.
+
+| Site | `--cap-id` | `--point` | `--agent` | Artefact |
+|---|---|---|---|---|
+| plan-phase research | `research` | `plan:pre` | `gsd-phase-researcher` | `${PHASE_DIR}/${PADDED_PHASE}-RESEARCH.md` |
+| plan-phase pattern mapping | `pattern-mapper` | `plan:pre` | `gsd-pattern-mapper` | `${PHASE_DIR}/${PADDED_PHASE}-PATTERNS.md` |
+| code-review | `code-review` | `$CODE_REVIEW_POINT` | `gsd-code-reviewer` | `${REVIEW_PATH}` |
+
+1. **Plan.** Code-review writes `REVIEW_FILES` one path per line to a temporary file and passes
+   it as `--scope-file`, with the default stage. Research and pattern mapping pass
+   `--stage decompose` first. Note the start time for `wall_clock_ms`.
+2. **`single` verdict.** Print the loud banner when `loud` is `true`, then run the site's own
+   spawn unchanged. When `loud` is `false`, print nothing, record nothing, and run the site's own
+   spawn unchanged: a project without swarm behaves exactly as before. If the verb itself
+   fails (non-zero exit, or output that is not JSON), print
+   `◆ Swarm skipped for <role>: fan-out-plan failed — running single-agent <agent>` and do the same.
+3. **Decompose** (only when the verdict's `stage` is `decompose`). Dispatch its one dispatch,
+   write the returned JSON object to a temporary file, and call the verb again with
+   `--stage fan-out --units <that file>`. Go back to step 2 with the new verdict. The
+   decomposition's dispatch is one of the run's dispatches for step 7.
+4. **Workers.** Dispatch the first stage's `worker` and `cross-file` dispatches in waves of at most
+   `concurrency.c` `Agent()` calls per message. Use each dispatch's `prompt` verbatim, its
+   `agentType` as `subagent_type`, and pass `model` and `tier` both. Omit `model` when it is
+   `inherit` or empty (#2517); keep `tier`. Wait for every wave before the next. If the first
+   worker reports the agent tool unavailable, the run misses `no_agent_tool`.
+5. **Keep and check the answers.** Write every returned text, in plan order, as a JSON array of
+   `{ "purpose": "worker" | "cross-file", "text": "<the returned text, unedited>" }` to
+   `${PHASE_DIR}/${PADDED_PHASE}-SWARM-ANSWERS-<role>.json`. The file stays in the phase
+   directory for audit and for the fixture captures. Then run
+   `gsd_run swarm check-answers --agent <agent> --answers <that file>`. A verdict of
+   `too_many_dropped_answers` is a run-time miss.
+6. **Synthesize.** Build the synthesizer prompt as the site's own filled prompt, the one the
+   single-agent spawn would send, followed by the plan's `synthesizer` prompt with the token
+   `<swarm_worker_answers_slot/>` replaced by the `block` field that `check-answers` printed,
+   unchanged. Dispatch it as the site's own spawn does, with the site's model. If the artefact
+   does not exist afterwards, the run misses `synthesis_failed`.
+7. **Check the anchors.** Run `gsd_run swarm verify-anchors <artefact> --prune`. `verdict: "ok"`
+   with a non-empty `pruned` list means claims were removed: print
+   `◆ Swarm removed <n> unverified claim(s) from <artefact>` and keep the artefact.
+   `anchor_check_failed` is a run-time miss.
+8. **Fall back on a miss.** Print the loud banner with the miss's reason and run the site's own
+   spawn unchanged. Its artefact overwrites whatever the swarm wrote. This is the reserved
+   dispatch.
+9. **Record.** Whenever the verdict was `fan-out` or a loud `single`, write one entry to a
+   temporary file and run `gsd_run swarm record --phase <the --phase value step 1 passed> --entry <that file>`:
+
+   ```json
+   { "run_id": "code-reviewer-20261010T120000Z", "role": "code-reviewer", "mode": "swarm",
+     "reason": "ok", "wall_clock_ms": 123456,
+     "dispatches": [ { "stage": "workers", "agentType": "gsd-swarm-worker", "model": "haiku",
+       "tier": "haiku", "tokens": null, "duration_ms": null, "usage_source": "unreported" } ] }
+   ```
+
+   `mode` is `swarm` when the swarm artefact stood and `single` after a fallback or a loud
+   `single` verdict; `reason` is then that reason or miss. `stage` is the plan stage's `id`.
+
+   List every dispatch made, the fallback included. Write `"usage_source": "host"` with an
+   integer `tokens` only for a figure the host reported for that dispatch; with no figure write
+   `null` and `"unreported"`, or `estimated_tokens` with `"estimate_chars_div_4"`. Never write
+   `0` for an unknown figure.
+
+10. **Commit the run's files.** The sites' own commit steps name their artefacts only, so commit
+    the swarm files separately; `query commit` applies `commit_docs` itself:
+
+    ```bash
+    gsd_run query commit "docs(${PADDED_PHASE}): swarm <role> telemetry" \
+      --files "${PHASE_DIR}/${PADDED_PHASE}-SWARM.json" "${PHASE_DIR}/${PADDED_PHASE}-SWARM-ANSWERS-<role>.json"
+    ```
+
+    Name the answers file only when step 5 wrote it.
+
 ## What a plan may contain
 
 Core validates every plan a strategy returns and rejects, as `invalid_plan`:

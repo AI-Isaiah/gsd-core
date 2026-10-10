@@ -286,6 +286,7 @@ module.exports = {
   "tests/state-todos-render.test.cjs",
   "tests/state.platform.test.cjs",
   "tests/swarm-anchors.test.cjs",
+  "tests/swarm-spawn-sites.test.cjs",
   "tests/teams-status.test.cjs",
   "tests/test-gate-watch-mode.test.cjs",
   "tests/todos-workstream-scope.test.cjs",
