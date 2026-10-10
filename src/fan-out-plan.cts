@@ -374,10 +374,26 @@ export function validateFanOutPlan(plan: unknown, ctx: ValidateFanOutPlanContext
 }
 
 /** A strategy's quiet or loud refusal: `{ "mode": "single", "reason": "<code>" }`. */
-export function readStrategySingle(answer: unknown): { reason: string } | null {
+export const STRATEGY_DETAIL_MAX_BYTES = 512;
+
+/**
+ * A strategy's quiet or loud refusal. Its `reason` must be a code or it becomes `strategy_failed`;
+ * its optional `detail` (what the user should fix) is kept, with control characters replaced and
+ * cut to `STRATEGY_DETAIL_MAX_BYTES`, since it reaches the banner a spawn site prints.
+ */
+export function readStrategySingle(answer: unknown): { reason: string; detail?: string } | null {
   if (!isPlainObject(answer) || answer['mode'] !== 'single') return null;
   const reason = answer['reason'];
-  return { reason: typeof reason === 'string' && STRATEGY_REASON_RE.test(reason) ? reason : FAN_OUT_REASON.STRATEGY_FAILED };
+  const out: { reason: string; detail?: string } = {
+    reason: typeof reason === 'string' && STRATEGY_REASON_RE.test(reason) ? reason : FAN_OUT_REASON.STRATEGY_FAILED,
+  };
+  const detail = answer['detail'];
+  if (typeof detail === 'string' && detail.length > 0) {
+    let clean = detail.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ');
+    while (byteLength(clean) > STRATEGY_DETAIL_MAX_BYTES) clean = clean.slice(0, -1);
+    out.detail = clean;
+  }
+  return out;
 }
 
 export interface ConcurrencyInput {
@@ -495,7 +511,7 @@ export function planFanOut(input: PlanFanOutInput, deps: PlanFanOutDeps): PlanFa
   const invoked = deps.invokeStrategy(strategy);
   if (!invoked.ok) return single(FAN_OUT_REASON.STRATEGY_FAILED, invoked.detail, strategy);
   const declined = readStrategySingle(invoked.answer);
-  if (declined) return single(declined.reason, undefined, strategy);
+  if (declined) return single(declined.reason, declined.detail, strategy);
 
   if (!deps.parallelizationEnabled()) return single(FAN_OUT_REASON.PARALLELIZATION_DISABLED, undefined, strategy);
   if (!deps.namedDispatch()) return single(FAN_OUT_REASON.NO_NAMED_DISPATCH, undefined, strategy);

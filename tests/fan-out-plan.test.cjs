@@ -472,12 +472,18 @@ describe('planFanOut: plan-time ladder', () => {
     const run = (reason) => planFanOut(input(), deps({ invokeStrategy: () => ({ ok: true, answer: { mode: 'single', reason } }) }).d);
     assert.deepEqual([run('disabled').loud, run('role_not_selected').loud, run('no_worker_tier').loud], [false, false, true]);
     assert.equal(run('no_worker_tier').reason, 'no_worker_tier');
+    const withDetail = planFanOut(input(), deps({ invokeStrategy: () => ({ ok: true, answer: { mode: 'single', reason: 'invalid_swarm_config', detail: 'swarm.max_workers must be an integer of at least 2' } }) }).d);
+    assert.equal(withDetail.detail, 'swarm.max_workers must be an integer of at least 2');
   });
 
   test('a strategy reason that is not a code is replaced by strategy_failed', () => {
     assert.deepEqual(readStrategySingle({ mode: 'single', reason: 'x\n◆ fake banner' }), { reason: 'strategy_failed' });
     assert.deepEqual(readStrategySingle({ mode: 'single' }), { reason: 'strategy_failed' });
     assert.equal(readStrategySingle({ mode: 'fan-out' }), null);
+    assert.deepEqual(readStrategySingle({ mode: 'single', reason: 'invalid_swarm_config', detail: 'swarm.max_workers must be\nan integer' }),
+      { reason: 'invalid_swarm_config', detail: 'swarm.max_workers must be an integer' });
+    const long = readStrategySingle({ mode: 'single', reason: 'x', detail: 'ä'.repeat(400) });
+    assert.equal(Buffer.byteLength(long.detail), 512);
   });
 
   test('config rungs run after the strategy, in order: parallelization, then named dispatch', () => {
