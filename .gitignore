@@ -348,6 +348,7 @@ build/
 /gsd-core/bin/lib/report-parser.cjs
 /gsd-core/bin/lib/pr-branch-patterns.cjs
 /gsd-core/bin/lib/undo-commit-selection.cjs
+/gsd-core/bin/lib/fan-out-plan.cjs
 __pycache__/
 *.pyc
 .venv/

@@ -74,6 +74,7 @@ module.exports = {
   "tests/external-job.test.cjs",
   "tests/failing-direction.test.cjs",
   "tests/fallow-runner.test.cjs",
+  "tests/fan-out-plan.test.cjs",
   "tests/feat-2483-review-claude-mds-guard.test.cjs",
   "tests/features-index-gate.test.cjs",
   "tests/frontmatter.unit.test.cjs",

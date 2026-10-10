@@ -123,6 +123,8 @@ interface RawHook {
   check?: unknown;
   /** #4209 DISP-02: step-only reviewer-lane opt-in trait; validated boolean upstream. */
   supportsReviewerLanes?: unknown;
+  /** #5273: step-only fan-out opt-in trait; validated boolean upstream. */
+  supportsFanOut?: unknown;
 }
 
 type HookKind = 'step' | 'contribution' | 'gate';
@@ -148,6 +150,8 @@ interface ActiveHook {
    * by carrying `false`.
    */
   supportsReviewerLanes?: true;
+  /** #5273 (ADR-5273): step-only fan-out opt-in trait, inert by absence like the one above. */
+  supportsFanOut?: true;
 }
 
 interface ResolveLoopHooksInput {
@@ -303,6 +307,8 @@ function resolveLoopHooks(input: ResolveLoopHooksInput): ResolveLoopHooksResult 
     if (onError !== undefined) active.onError = onError;
     // #4209 DISP-02: only a literal `true` projects; absent/false stay inert.
     if (hook['supportsReviewerLanes'] === true) active.supportsReviewerLanes = true;
+    // #5273: same projection rule for the fan-out trait.
+    if (hook['supportsFanOut'] === true) active.supportsFanOut = true;
     activeHooks.push(active);
   }
 
@@ -498,6 +504,8 @@ interface ResolvedActiveHooks {
   point: string;
   activeHooks: ActiveHook[];
   warnings: string[];
+  /** #5273: active capabilities declaring `fanOutStrategy`, in registry order. */
+  fanOutStrategies: Array<{ capId: string; command: string }>;
 }
 
 /**
@@ -612,7 +620,21 @@ function resolveActiveHooksForPoint(
   // (in addition to the stderr emission above, which is the channel host workflows actually see).
   const combinedWarnings = [...(state.warnings || []), ...loadFailWarnings];
 
-  return { point: resolved.point, activeHooks: resolved.activeHooks, warnings: combinedWarnings };
+  // #5273 (ADR-5273 Decision 1): every ACTIVE capability declaring `fanOutStrategy`, from the
+  // same overlay-aware registry and capability state the hooks above were resolved against, so
+  // `loop fan-out-plan` never re-derives activation. More than one is reported, not resolved.
+  const fanOutStrategies: Array<{ capId: string; command: string }> = [];
+  const caps = (registry as { capabilities?: Record<string, unknown> })['capabilities'];
+  if (caps && typeof caps === 'object') {
+    for (const [capId, cap] of Object.entries(caps)) {
+      if (capabilityStatesById.get(capId)?.active !== true) continue;
+      const fos = cap && typeof cap === 'object' ? (cap as Record<string, unknown>)['fanOutStrategy'] : undefined;
+      const command = fos && typeof fos === 'object' ? (fos as Record<string, unknown>)['command'] : undefined;
+      if (typeof command === 'string') fanOutStrategies.push({ capId, command });
+    }
+  }
+
+  return { point: resolved.point, activeHooks: resolved.activeHooks, warnings: combinedWarnings, fanOutStrategies };
 }
 
 // ─── #5105 R2: post-fingerprint hook gating ────────────────────────────────
@@ -734,7 +756,7 @@ function cmdLoopRenderHooks(
       coreError(`--after-fingerprint phase directory not found or unreadable: ${afterFingerprintDir} (${msg})`);
       return;
     }
-    result = { point: result.point, activeHooks: partition.activeHooks, warnings: result.warnings };
+    result = { ...result, activeHooks: partition.activeHooks };
     skippedHooks = partition.skippedHooks;
   }
 

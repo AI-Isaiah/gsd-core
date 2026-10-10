@@ -99,6 +99,7 @@ module.exports = {
   "tests/external-descriptor-confinement.test.cjs",
   "tests/failing-direction.test.cjs",
   "tests/fallow-runner.test.cjs",
+  "tests/fan-out-plan.test.cjs",
   "tests/faulty-deps.test.cjs",
   "tests/feat-2483-review-claude-mds-guard.test.cjs",
   "tests/features-index-gate.test.cjs",

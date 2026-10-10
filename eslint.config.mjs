@@ -203,6 +203,7 @@ export default tseslint.config(
       'gsd-core/bin/lib/review-lane-invocation.cjs',
       'gsd-core/bin/lib/review-lane-runner.cjs',
       'gsd-core/bin/lib/reviewer-step-dispatch.cjs',
+      'gsd-core/bin/lib/fan-out-plan.cjs',
       'gsd-core/bin/lib/clusters.cjs',
       'gsd-core/bin/lib/installer-migrations/001-legacy-orphan-files.cjs',
       'gsd-core/bin/lib/observability/redaction.cjs',

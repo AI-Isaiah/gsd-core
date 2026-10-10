@@ -75,6 +75,13 @@ reuses it by declaring the same trait on its own step and calling `dispatch-step
 matching its own CLI flags against the reviewer-lane roster and assembling the evidence block
 handed to its consolidator — those are NOT part of what this trait makes reusable.
 
+**`supportsFanOut` (optional, boolean).** A `step` entry may carry `supportsFanOut: true` (#5273,
+ADR-5273). It changes how the step is dispatched, never whether it runs or what it writes. A spawn
+site opts in by calling `gsd_run loop fan-out-plan --cap-id <capId> --point <point> --agent <agent>
+--phase <n>` before dispatching the step's agent, and follows the verdict as described in
+`fan-out-dispatch.md`. Absent or `false` is inert: the verb answers `{ "mode": "single",
+"reason": "no_fan_out_trait" }` and the site dispatches its single agent as before.
+
 A `step` is **advisory by construction**: it never blocks or redirects the host workflow —
 that is what a `gate` is for. Each dispatch is best-effort; on error record a warning and
 continue, honoring `onError`.

@@ -83,6 +83,7 @@ Steps run at a loop extension point as independent units. Ordering within a poin
 | `when` | string | No | Dotted config key; the step is active only when the key is truthy. Evaluated deterministically at render time; phase-context applicability is the skill's own responsibility. |
 | `fragment` | object | No | Optional inline-or-file prompt fragment attached to the step, with the **same** `{ "path": "<relative path>" }` or `{ "inline": "<string>" }` semantics as a contribution's `fragment`. A `path` is materialised (read and inlined) at load time, resolved against the capability directory and confined to it (`..` traversal is rejected). |
 | `supportsReviewerLanes` | boolean | No | Strict opt-in trait (#4209): declares that this step's dispatch target accepts external reviewer-lane evidence. Only a literal `true` opts in — every other type fails validation, and `false`/omitted are inert (no reviewer-lane behaviour, no key on the projected active hook). Step-scoped, not capability-wide. |
+| `supportsFanOut` | boolean | No | Strict opt-in trait (#5273, [ADR-5273](../adr/5273-swarm-fan-out-capability.md)): lets `gsd_run loop fan-out-plan` hand this step to the active `fanOutStrategy`, which may fan the step's work out to read-only workers whose answers the step's own agent synthesizes. Same boolean contract as `supportsReviewerLanes`: only a literal `true` opts in, `false`/omitted are inert. It changes how the step is dispatched, never whether it runs or what it `produces`. See [`fan-out-dispatch.md`](../../gsd-core/references/fan-out-dispatch.md). |
 
 ### `contributions`
 
@@ -139,6 +140,21 @@ for the authoring walkthrough.
 | `invoke.timeoutMs` | number | Yes | Bound on the subprocess invocation. Required — an unbounded resolver subprocess is this repo's named Unbounded Subprocesses defect class. A resolver exceeding this bound is killed and `task resolve-content` exits non-zero. |
 
 `taskContentResolver` is feature-role only (`role: "feature"`); it is not admissible on `role: "runtime"` or `role: "reviewer"` bodies.
+
+### `fanOutStrategy`
+
+Declares that this capability decides how a step carrying `supportsFanOut: true` fans out
+(#5273, [ADR-5273](../adr/5273-swarm-fan-out-capability.md)). Like `taskContentResolver`, it is
+not a `steps` / `contributions` / `gates` entry and has no `point`: `gsd_run loop fan-out-plan`
+invokes it on demand and validates what it returns. Core owns the plan schema, its validator and
+the degradation reasons; every policy choice (how to decompose a brief, how many workers, which
+prompts) belongs to the strategy.
+
+| Sub-field | Type | Required | Description |
+|---|---|---|---|
+| `command` | string | Yes | `"<family> <subcommand>"`, lowercase kebab-case, naming one of this capability's **own** `commands` families. It is run as `gsd_run <family> <subcommand> --cap-id <id> --point <point> --agent <agent> --phase <n> --stage <stage> [--units <file>]` and must print either a fan-out plan or `{ "mode": "single", "reason": "<code>" }`. |
+
+`fanOutStrategy` is feature-role only (`role: "feature"`); it is not admissible on `role: "runtime"` or `role: "reviewer"` bodies. At most one capability may declare it.
 
 ---
 
@@ -337,6 +353,7 @@ The following invariants are enforced at **build time** by `scripts/gen-capabili
 - **Path confinement.** Declared module paths may not use parent-directory traversal (`../`); modules are `require()`'d only from the capability's own install root.
 - **Reserved namespace.** Capability `id` values beginning with `gsd-`, `gsd-core-`, or `anthropic-` are reserved; third-party capabilities using these prefixes are rejected.
 - **`taskContentResolver.trackerPrefix` uniqueness, feature-only.** `trackerPrefix` must be unique across the merged first-party ∪ overlay capability set (mirrors `reviewsSection` uniqueness on the reviewer body above); a collision is a build-time violation. `taskContentResolver` is admissible only on `role: "feature"` bodies.
+- **`fanOutStrategy` uniqueness, feature-only.** At most one first-party capability may declare `fanOutStrategy` (a second is a build-time violation), and its `command` family must be one the declaring capability owns. When installed overlays leave more than one active, `loop fan-out-plan` refuses to choose and answers `ambiguous_strategy`.
 
 ---
 

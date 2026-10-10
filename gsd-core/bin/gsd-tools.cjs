@@ -2351,7 +2351,10 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
    *   --json  → prints { runtime, capacity, declared, source, reason }
    *   default → same as --raw
    */
-  function routeDispatchCapacity({ args, cwd, raw }) {
+  // #5273: the one resolution of `dispatch-capacity`, shared by the query below and by
+  // `loop fan-out-plan` (ADR-5273 Decision 2), so the two can never disagree about a host's
+  // ceiling or its source/reason.
+  function resolveDispatchCapacity(cwd) {
     const { UNDOCUMENTED, isPositiveSafeInteger } = require('./lib/host-integration.cjs');
 
     let runtimeId = null;
@@ -2412,6 +2415,11 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       reason = 'non_positive';
     }
 
+    return { runtimeId, runtimeEntry, capacity, declared, source, reason };
+  }
+
+  function routeDispatchCapacity({ args, cwd, raw }) {
+    const { runtimeId, capacity, declared, source, reason } = resolveDispatchCapacity(cwd);
     if (args.indexOf('--json') !== -1) {
       output({ runtime: runtimeId, capacity, declared, source, reason }, raw);
     } else {
@@ -3274,12 +3282,111 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
               runtime: loopRuntime,
               afterFingerprint: loopAfterFingerprint,
             });
+          } else if (loopSubcommand === 'fan-out-plan') {
+            routeLoopFanOutPlan({ args, cwd, raw });
           } else {
             error(
-              `Unknown loop subcommand: ${loopSubcommand}. Available: render-hooks`,
+              `Unknown loop subcommand: ${loopSubcommand}. Available: render-hooks, fan-out-plan`,
               ERROR_REASON ? ERROR_REASON.SDK_UNKNOWN_COMMAND : undefined,
             );
           }
+  }
+
+  // #5273 (ADR-5273 Decisions 1, 2, 6, 9) — `loop fan-out-plan`: ask the one active
+  // `fanOutStrategy` how to fan out a step that declared `supportsFanOut: true`, validate its
+  // answer, and print either the plan or `{ mode: "single", reason, loud }`. Every decision is in
+  // `planFanOut` (src/fan-out-plan.cts); this route only parses argv and wires the real seams.
+  // A `single` verdict is an answer, not an error, so it exits 0. See
+  // gsd-core/references/fan-out-dispatch.md for how a spawn site consumes the result.
+  function routeLoopFanOutPlan({ args, cwd, raw }) {
+    const { planFanOut, FAN_OUT_STAGES } = require('./lib/fan-out-plan.cjs');
+    const valueOf = (name) => {
+      const eq = args.find((a) => a.startsWith(`--${name}=`));
+      if (eq) return eq.slice(name.length + 3);
+      const idx = args.indexOf(`--${name}`);
+      if (idx === -1) return undefined;
+      const v = args[idx + 1];
+      if (v === undefined || v.startsWith('--')) error(`Missing value for --${name}`, ERROR_REASON.USAGE);
+      return v;
+    };
+    const usage = 'Usage: loop fan-out-plan --cap-id <id> --point <point> --agent <agent> --phase <n> [--stage decompose|fan-out] [--units <file>]';
+    const capId = valueOf('cap-id');
+    const point = valueOf('point');
+    const stepAgent = valueOf('agent');
+    const phaseArg = valueOf('phase');
+    const stage = valueOf('stage') || 'fan-out';
+    const unitsArg = valueOf('units');
+    for (const [name, v] of [['cap-id', capId], ['point', point], ['agent', stepAgent], ['phase', phaseArg]]) {
+      if (!v) error(`--${name} is required. ${usage}`, ERROR_REASON.USAGE);
+      if ([...v].some((ch) => ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f)) {
+        error(`--${name} must not contain control characters`, ERROR_REASON.USAGE);
+      }
+    }
+    if (!FAN_OUT_STAGES.includes(stage)) error(`--stage must be one of ${FAN_OUT_STAGES.join(', ')}. ${usage}`, ERROR_REASON.USAGE);
+    if (stage === 'decompose' && unitsArg !== undefined) error(`--units is only valid with --stage fan-out. ${usage}`, ERROR_REASON.USAGE);
+    let unitsPath;
+    if (unitsArg !== undefined) {
+      unitsPath = path.resolve(cwd, unitsArg);
+      let st = null;
+      try { st = fs.statSync(unitsPath); } catch { st = null; }
+      if (!st || !st.isFile()) error(`--units file not found or not a regular file: ${unitsArg}`, ERROR_REASON.USAGE);
+    }
+
+    let resolved;
+    try {
+      resolved = loopResolver.resolveActiveHooksForPoint(cwd, point);
+    } catch (e) {
+      error(`loop fan-out-plan: ${e && e.message ? e.message : String(e)}`, ERROR_REASON.USAGE);
+    }
+    const stepHook = resolved.activeHooks.find((h) => h && h.kind === 'step' && h.capId === capId && h.supportsFanOut === true);
+    // A step whose own ref names an agent must name the same agent the spawn site passed, so a
+    // spawn site can never promote some other agent to synthesizer.
+    if (stepHook && stepHook.ref && typeof stepHook.ref.agent === 'string' && stepHook.ref.agent !== stepAgent) {
+      error(`--agent ${stepAgent} does not match the step's own agent ${stepHook.ref.agent}`, ERROR_REASON.USAGE);
+    }
+
+    const result = planFanOut(
+      { stage, stepAgent, projectRoot: cwd, decomposed: unitsPath !== undefined },
+      {
+        resolveStep: () => ({ trait: Boolean(stepHook), strategies: resolved.fanOutStrategies || [] }),
+        invokeStrategy: (strategy) => {
+          const [family, sub] = strategy.command.split(' ');
+          const argv = [__filename, family, sub, '--cap-id', capId, '--point', point, '--agent', stepAgent, '--phase', phaseArg, '--stage', stage];
+          if (unitsPath !== undefined) argv.push('--units', unitsPath);
+          const cp = require('node:child_process');
+          const r = cp.spawnSync(process.execPath, argv, { cwd, encoding: 'utf8', timeout: 120000, maxBuffer: 8 * 1024 * 1024 });
+          if (r.error) return { ok: false, detail: `${strategy.command}: ${r.error.message}` };
+          if (r.status !== 0) {
+            const tail = String(r.stderr || '').trim().split('\n').slice(-3).join(' | ');
+            return { ok: false, detail: `${strategy.command} exited ${r.status}${tail ? `: ${tail}` : ''}` };
+          }
+          let text;
+          try { text = resolveAtFileOutput(String(r.stdout || '').trim()); } catch (e) { return { ok: false, detail: `${strategy.command}: ${e.message}` }; }
+          const { safeJsonParse } = require('./lib/security.cjs');
+          const parsed = safeJsonParse(text, { maxLength: 4 * 1024 * 1024, label: strategy.command });
+          return parsed.ok ? { ok: true, answer: parsed.value } : { ok: false, detail: `${strategy.command}: ${parsed.error}` };
+        },
+        parallelizationEnabled: () => {
+          try { return require('./lib/config-loader.cjs').loadConfig(cwd).parallelization !== false; } catch { return false; }
+        },
+        maxConcurrentAgents: () => config.readMaxConcurrentAgents(config.loadConfigJson(cwd)),
+        namedDispatch: () => {
+          const { runtimeEntry } = resolveDispatchCapacity(cwd);
+          return runtimeEntry?.runtime?.hostIntegration?.dispatch?.namedDispatch === true;
+        },
+        dispatchCapacity: () => {
+          const { capacity, source, reason } = resolveDispatchCapacity(cwd);
+          return { capacity, source, reason };
+        },
+        resolveModel: (agentType) => {
+          try {
+            const mr = require('./lib/model-resolver.cjs');
+            return { model: mr.resolveModelInternal(cwd, agentType), tier: mr.resolveTierInternal(cwd, agentType) };
+          } catch { return null; }
+        },
+      },
+    );
+    output(result, raw);
   }
 
   function routePhasePlanIndex({ args, cwd, raw, error }) {

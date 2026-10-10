@@ -609,7 +609,13 @@ function _setNestedValue(
       error('Invalid config key (prototype pollution guard): ' + keyPath, ERROR_REASON.CONFIG_PARSE_FAILED);
     }
     const existingChild = current[key];
-    if (existingChild === undefined || existingChild === null || typeof existingChild !== 'object' || Array.isArray(existingChild)) {
+    // #5273: `parallelization` has a documented boolean shorthand that `loadConfig` reads as
+    // `parallelization.enabled`. Descending into it for a nested key must carry that boolean
+    // over as `enabled`; replacing it with `{}` would silently flip `parallelization: false`
+    // back to the default `true`.
+    if (i === 0 && key === 'parallelization' && typeof existingChild === 'boolean') {
+      current[key] = { enabled: existingChild };
+    } else if (existingChild === undefined || existingChild === null || typeof existingChild !== 'object' || Array.isArray(existingChild)) {
       current[key] = {};
     }
     current = current[key] as Record<string, unknown>;
@@ -690,6 +696,39 @@ function _unsetNestedValue(
  * pattern: independently-guessed copies of the same logic can silently
  * drift apart).
  */
+/**
+ * #5273 (ADR-5273 Decision 2): the documented default of `parallelization.max_concurrent_agents`,
+ * as stated in docs/CONFIGURATION.md and gsd-core/templates/config.json.
+ */
+const DEFAULT_MAX_CONCURRENT_AGENTS = 3;
+
+function isValidMaxConcurrentAgents(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+}
+
+type MaxConcurrentAgentsResult =
+  | { ok: true; value: number; source: 'config' | 'default' }
+  | { ok: false; reason: 'invalid_max_concurrent_agents'; value: unknown };
+
+/**
+ * #5273: the one reader of `parallelization.max_concurrent_agents`, over a raw parsed
+ * config.json object. An absent key (including the boolean `parallelization` shorthand, which
+ * carries no nested keys) resolves to the documented default. A present value that is not a
+ * positive safe integer is reported, never clamped, so the caller can fail closed.
+ */
+function readMaxConcurrentAgents(rawConfig: unknown): MaxConcurrentAgentsResult {
+  const section = rawConfig && typeof rawConfig === 'object' && !Array.isArray(rawConfig)
+    ? (rawConfig as Record<string, unknown>)['parallelization']
+    : undefined;
+  if (!section || typeof section !== 'object' || Array.isArray(section)
+    || !Object.prototype.hasOwnProperty.call(section, 'max_concurrent_agents')) {
+    return { ok: true, value: DEFAULT_MAX_CONCURRENT_AGENTS, source: 'default' };
+  }
+  const value = (section as Record<string, unknown>)['max_concurrent_agents'];
+  if (isValidMaxConcurrentAgents(value)) return { ok: true, value, source: 'config' };
+  return { ok: false, reason: 'invalid_max_concurrent_agents', value };
+}
+
 function loadConfigJson(cwd: string): Record<string, unknown> {
   const configPath = path.join(planningDir(cwd), 'config.json');
   let config: Record<string, unknown> = {};
@@ -937,6 +976,13 @@ function cmdConfigSet(cwd: string, keyPath: string | undefined, value: string | 
   if (kp === 'workflow.drift_threshold') {
     if (typeof parsedValue !== 'number' || !Number.isInteger(parsedValue) || parsedValue < 1) {
       error(`Invalid workflow.drift_threshold '${val}'. Must be a positive integer.`);
+    }
+  }
+
+  // #5273: one predicate for accept (here) and honour (readMaxConcurrentAgents below).
+  if (kp === 'parallelization.max_concurrent_agents') {
+    if (!isValidMaxConcurrentAgents(parsedValue)) {
+      error(`Invalid parallelization.max_concurrent_agents '${val}'. Must be a positive integer.`, ERROR_REASON.USAGE);
     }
   }
 
@@ -1499,6 +1545,10 @@ function cmdMigrateConfig(cwd: string, raw: boolean): void {
 
 export = {
   VALID_CONFIG_KEYS,
+  DEFAULT_MAX_CONCURRENT_AGENTS,
+  isValidMaxConcurrentAgents,
+  readMaxConcurrentAgents,
+  loadConfigJson,
   VALID_PHASE_ID_CONVENTIONS,
   cmdConfigEnsureSection,
   cmdConfigSet,

@@ -398,6 +398,9 @@ function validateCapability(cap, folderId) {
     errors.push(...validateReviewerBody(cap));
     // ADR-3646: a runtime capability installs a host CLI, it does not resolve
     // task content — taskContentResolver is feature-only.
+    if (cap.fanOutStrategy !== undefined) {
+      errors.push('role:runtime capability must not have a "fanOutStrategy" field (feature-only field)');
+    }
     if (cap.taskContentResolver !== undefined) {
       errors.push('role:runtime capability must not have a "taskContentResolver" body (feature-only field)');
     }
@@ -555,6 +558,30 @@ function validateRuntimeCompat(capId, runtimeCompat) {
   return errors;
 }
 
+const FAN_OUT_STRATEGY_COMMAND_RE = /^[a-z][a-z0-9-]* [a-z][a-z0-9-]*$/;
+
+function validateFanOutStrategy(cap) {
+  const errors = [];
+  const fos = cap.fanOutStrategy;
+  if (typeof fos !== 'object' || fos === null || Array.isArray(fos)) {
+    errors.push('fanOutStrategy must be an object with a "command" string');
+    return errors;
+  }
+  for (const key of Object.keys(fos)) {
+    if (key !== 'command') errors.push('fanOutStrategy carries unknown field "' + key + '"');
+  }
+  if (typeof fos.command !== 'string' || !FAN_OUT_STRATEGY_COMMAND_RE.test(fos.command)) {
+    errors.push('fanOutStrategy.command must be "<family> <subcommand>" in lowercase kebab-case');
+    return errors;
+  }
+  const family = fos.command.split(' ')[0];
+  const owned = Array.isArray(cap.commands) && cap.commands.some((c) => c && c.family === family);
+  if (!owned) {
+    errors.push('fanOutStrategy.command family "' + family + '" is not one of this capability\'s own commands families');
+  }
+  return errors;
+}
+
 function validateFeatureBody(cap) {
   const errors = [];
 
@@ -582,6 +609,14 @@ function validateFeatureBody(cap) {
         errors.push(...validateCommandEntry(cap.id || cap.role, cap.commands[i], 'commands[' + i + ']'));
       }
     }
+  }
+
+  // #5273 (ADR-5273 Decision 1): optional fanOutStrategy. The command must name
+  // one of this capability's OWN command families, so the strategy is always
+  // code the declaring capability ships. Registry-wide uniqueness is checked in
+  // the cross-capability pass.
+  if (cap.fanOutStrategy !== undefined) {
+    errors.push(...validateFanOutStrategy(cap));
   }
 
   if (!Array.isArray(cap.agents)) {
@@ -1060,7 +1095,7 @@ const HTTP_ONLY_INVOKE_FIELDS  = ['hostConfigKey', 'defaultHost', 'path', 'model
 
 // Feature-only fields are as forbidden on a lane-only capability as on a runtime
 // one; a `role: "reviewer"` capability owns no artefacts and wires no loop point.
-const FEATURE_FIELDS_FORBIDDEN_ON_REVIEWER = ['skills', 'agents', 'steps', 'contributions', 'gates', 'hooks', 'activationKey', 'taskContentResolver'];
+const FEATURE_FIELDS_FORBIDDEN_ON_REVIEWER = ['skills', 'agents', 'steps', 'contributions', 'gates', 'hooks', 'activationKey', 'taskContentResolver', 'fanOutStrategy'];
 
 // GATE A: installSurface → allowed hooksSurface values (DEFECT.GENERATIVE-FIX: parity invariant)
 // Derived from the actual pairings in the 16 real runtime descriptors.
@@ -2976,6 +3011,13 @@ function validateStep(step, prefix, declaredSkills, declaredAgents) {
     errors.push(prefix + '.supportsReviewerLanes must be a boolean if present');
   }
 
+  // #5273 (ADR-5273 Decision 1): strict optional boolean, same contract as
+  // supportsReviewerLanes. Only a literal `true` lets `loop fan-out-plan` hand
+  // this step to the active fanOutStrategy.
+  if (step.supportsFanOut !== undefined && typeof step.supportsFanOut !== 'boolean') {
+    errors.push(prefix + '.supportsFanOut must be a boolean if present');
+  }
+
   if (step.fragment !== undefined) {
     errors.push(...validateFragment(step.fragment, prefix + '.fragment'));
   }
@@ -3337,6 +3379,7 @@ function validateCrossCapability(capMap, centralKeys, centralPatterns = []) {
   const skillOwner = new Map(); // skill → capId
   const agentOwner = new Map(); // agent → capId
   const familyOwner = new Map(); // command family → capId (ADR-959)
+  let fanOutStrategyOwner = null; // #5273: the one capability declaring fanOutStrategy
   for (const [capId, cap] of capMap) {
     if (cap.role !== 'feature') continue;
     for (const skill of cap.skills) {
@@ -3355,6 +3398,16 @@ function validateCrossCapability(capMap, centralKeys, centralPatterns = []) {
         );
       } else {
         agentOwner.set(agent, capId);
+      }
+    }
+    // #5273 (ADR-5273 Decision 1): at most one capability declares fanOutStrategy.
+    if (cap.fanOutStrategy !== undefined) {
+      if (fanOutStrategyOwner !== null) {
+        errors.push(
+          'fanOutStrategy is declared by both "' + fanOutStrategyOwner + '" and "' + capId + '"; at most one capability may declare it',
+        );
+      } else {
+        fanOutStrategyOwner = capId;
       }
     }
     // ADR-959: single family ownership across the whole registry
