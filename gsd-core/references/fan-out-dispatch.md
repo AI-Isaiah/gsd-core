@@ -103,7 +103,7 @@ Core validates every plan a strategy returns and rejects, as `invalid_plan`:
   than `--agent` for the `synthesizer`;
 - a `model` or `tier` that differs from `resolve-model` for the agent whose values it claims:
   `gsd-swarm-worker` for a `worker`, `--agent` for every other purpose;
-- a prompt over 32 KiB, a schema over 8 KiB, a scope over 64 paths;
+- a prompt over 32 KiB, a schema over 8 KiB, a scope over 512 paths;
 - a scope path that is empty, absolute, holds a `..` segment or a control character, does not
   exist, or resolves (through a symlink) outside the project root;
 - a `maxWorkers` below 2 (there is no upper bound), a `maxConcurrency` below 1, or more `worker`

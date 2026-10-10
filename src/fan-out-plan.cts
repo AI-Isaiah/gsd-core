@@ -57,7 +57,7 @@ export const ANSWER_MAX_BYTES = 4 * 1024;
 /** Byte bounds on model-bound text a plan carries (ADR-5273 Decision 9). */
 export const PROMPT_MAX_BYTES = 32 * 1024;
 export const SCHEMA_MAX_BYTES = 8 * 1024;
-export const SCOPE_MAX_PATHS = 64;
+export const SCOPE_MAX_PATHS = 512;
 
 export type WorkerAnswerResult =
   | { ok: true; bytes: number; answer: Record<string, unknown> }
