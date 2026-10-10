@@ -1137,6 +1137,7 @@ describe('#3897 rung 3: sandbox_mode derivation and the hold list', () => {
     'gsd-research-synthesizer': 'workspace-write',
     'gsd-roadmapper': 'workspace-write',
     'gsd-security-auditor': 'read-only',
+    'gsd-swarm-worker': 'read-only',
     'gsd-ui-auditor': 'workspace-write',
     'gsd-ui-checker': 'read-only',
     'gsd-ui-researcher': 'workspace-write',

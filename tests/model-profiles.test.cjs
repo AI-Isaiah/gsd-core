@@ -64,12 +64,26 @@ describe('MODEL_PROFILES', () => {
     }
   });
 
+  // #5273 (ADR-5273 Decision 3): the one deliberate exception. Swarm workers are weak by design;
+  // a swarm's quality comes from the strong synthesizer re-reading every anchor it keeps, so the
+  // worker is haiku in every profile. Any other agent added here needs its own ADR.
+  const HAIKU_IN_QUALITY_BY_DESIGN = new Set(['gsd-swarm-worker']);
+
   test('quality profile never uses haiku', () => {
     for (const [agent, profiles] of Object.entries(MODEL_PROFILES)) {
+      if (HAIKU_IN_QUALITY_BY_DESIGN.has(agent)) continue;
       assert.notStrictEqual(
         profiles.quality, 'haiku',
         `${agent} quality profile should not use haiku`
       );
+    }
+  });
+
+  test('the by-design exception is exactly gsd-swarm-worker, and it is haiku in every profile', () => {
+    const haikuInQuality = Object.entries(MODEL_PROFILES).filter(([, p]) => p.quality === 'haiku').map(([a]) => a);
+    assert.deepStrictEqual(haikuInQuality, [...HAIKU_IN_QUALITY_BY_DESIGN]);
+    for (const [profile, model] of Object.entries(MODEL_PROFILES['gsd-swarm-worker'])) {
+      assert.strictEqual(model, 'haiku', `gsd-swarm-worker.${profile}`);
     }
   });
 });

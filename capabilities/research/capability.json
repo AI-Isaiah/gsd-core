@@ -42,6 +42,7 @@
       "consumes": [
         "CONTEXT.md"
       ],
+      "supportsFanOut": true,
       "when": "workflow.research",
       "onError": "skip"
     }

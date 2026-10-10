@@ -61,6 +61,7 @@
       "consumes": [
         "SUMMARY.md"
       ],
+      "supportsFanOut": true,
       "supportsReviewerLanes": true,
       "when": "workflow.code_review",
       "pointFrom": "workflow.code_review_point",
@@ -75,6 +76,7 @@
         "REVIEW.md"
       ],
       "consumes": [],
+      "supportsFanOut": true,
       "supportsReviewerLanes": true,
       "when": "workflow.code_review",
       "pointFrom": "workflow.code_review_point",

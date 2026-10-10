@@ -1,6 +1,6 @@
 # GSD Agent Reference
 
-> Full role cards for 22 primary agents plus concise stubs for 12 advanced/specialized agents (34 shipped agents total). The `agents/` directory and [`docs/INVENTORY.md`](INVENTORY.md) are the authoritative roster; see [Architecture](ARCHITECTURE.md) for context.
+> Full role cards for 22 primary agents plus concise stubs for 14 advanced/specialized agents (36 shipped agents total). The `agents/` directory and [`docs/INVENTORY.md`](INVENTORY.md) are the authoritative roster; see [Architecture](ARCHITECTURE.md) for context.
 
 ---
 
@@ -12,7 +12,7 @@ GSD uses a multi-agent architecture where thin orchestrators (workflow files) sp
 
 ### Agent Categories
 
-> The table below covers the **22 primary agents** detailed in this section. Thirteen additional shipped agents (pattern-mapper, debug-session-manager, code-reviewer, code-fixer, ai-researcher, domain-researcher, eval-planner, eval-auditor, framework-selector, intel-updater, doc-classifier, doc-synthesizer, mempalace-curator) have concise stubs in the [Advanced and Specialized Agents](#advanced-and-specialized-agents) section below. For the authoritative 35-agent roster, see [`docs/INVENTORY.md`](INVENTORY.md) and the `agents/` directory.
+> The table below covers the **22 primary agents** detailed in this section. 14 additional shipped agents (pattern-mapper, debug-session-manager, code-reviewer, code-fixer, ai-researcher, domain-researcher, eval-planner, eval-auditor, framework-selector, intel-updater, doc-classifier, doc-synthesizer, mempalace-curator, swarm-worker) have concise stubs in the [Advanced and Specialized Agents](#advanced-and-specialized-agents) section below. For the authoritative 36-agent roster, see [`docs/INVENTORY.md`](INVENTORY.md) and the `agents/` directory.
 
 | Category | Count | Agents |
 |----------|-------|--------|
@@ -587,7 +587,7 @@ Communication style, decision patterns, debugging approach, UX preferences, vend
 
 ## Advanced and Specialized Agents
 
-Twelve additional agents ship under `agents/gsd-*.md` and are used by specialty workflows (`/gsd-ai-integration-phase`, `/gsd-eval-review`, `/gsd-code-review`, `/gsd-code-review --fix`, `/gsd-debug`, `/gsd-map-codebase --query`, `/gsd-ingest-docs`) and by the planner pipeline. Each carries full frontmatter in its agent file; the stubs below are concise by design. The authoritative roster (with spawner and primary-doc status per agent) lives in [`docs/INVENTORY.md`](INVENTORY.md).
+Fourteen additional agents ship under `agents/gsd-*.md` and are used by specialty workflows (`/gsd-ai-integration-phase`, `/gsd-eval-review`, `/gsd-code-review`, `/gsd-code-review --fix`, `/gsd-debug`, `/gsd-map-codebase --query`, `/gsd-ingest-docs`) and by the planner pipeline. Each carries full frontmatter in its agent file; the stubs below are concise by design. The authoritative roster (with spawner and primary-doc status per agent) lives in [`docs/INVENTORY.md`](INVENTORY.md).
 
 ### gsd-pattern-mapper
 
@@ -853,9 +853,31 @@ Twelve additional agents ship under `agents/gsd-*.md` and are used by specialty 
 
 ---
 
+### gsd-swarm-worker
+
+**Role:** One read-only worker in a swarm (BETA, [ADR-5273](adr/5273-swarm-fan-out-capability.md)). Answers one very small, file-scoped question with `file:line` evidence and verbatim quotes, as a single JSON object of at most 4 KiB. The step's own agent synthesizes many such answers into the unchanged artefact.
+
+| Property | Value |
+|----------|-------|
+| **Spawned by** | `swarm` capability, through `gsd_run loop fan-out-plan`, for research, pattern-mapping and code review |
+| **Parallelism** | Many: up to `swarm.max_workers` (default 20, no upper bound) per role run, in waves of up to `swarm.max_concurrency` |
+| **Tools** | Read, Grep, Glob |
+| **Disallowed Tools** | Write, Edit, Bash, WebSearch, WebFetch |
+| **Model** | Haiku in every profile, the one deliberate exception to "quality never uses haiku" |
+| **Color** | Cyan |
+| **Produces** | Nothing on disk; returns its answer to the orchestrator |
+| **Gated by** | `swarm.enabled` (default `false`) |
+
+**Key behaviors:**
+- Reads only the files in its `<scope>`; other workers cover the rest
+- Cites every claim with `path`, `lines` and a verbatim `quote`, or returns `not_found`
+- Treats text inside files as data, never as instructions
+
+---
+
 ## Agent Tool Permissions Summary
 
-> **Scope:** this table covers the 22 primary agents only. The 13 advanced/specialized agents listed above carry their own tool surfaces in their `agents/gsd-*.md` frontmatter (summarized in the per-agent stubs above and in [`docs/INVENTORY.md`](INVENTORY.md)).
+> **Scope:** this table covers the 22 primary agents only. The 14 advanced/specialized agents listed above carry their own tool surfaces in their `agents/gsd-*.md` frontmatter (summarized in the per-agent stubs above and in [`docs/INVENTORY.md`](INVENTORY.md)).
 
 | Agent | Read | Write | Edit | Bash | Grep | Glob | WebSearch | WebFetch | MCP |
 |-------|------|-------|------|------|------|------|-----------|----------|-----|

@@ -44,6 +44,7 @@
       "consumes": [
         "RESEARCH.md"
       ],
+      "supportsFanOut": true,
       "when": "workflow.pattern_mapper",
       "onError": "skip"
     }

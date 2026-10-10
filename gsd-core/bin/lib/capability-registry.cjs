@@ -919,6 +919,7 @@ const capabilities = {
         "consumes": [
           "SUMMARY.md"
         ],
+        "supportsFanOut": true,
         "supportsReviewerLanes": true,
         "when": "workflow.code_review",
         "pointFrom": "workflow.code_review_point",
@@ -933,6 +934,7 @@ const capabilities = {
           "REVIEW.md"
         ],
         "consumes": [],
+        "supportsFanOut": true,
         "supportsReviewerLanes": true,
         "when": "workflow.code_review",
         "pointFrom": "workflow.code_review_point",
@@ -3134,6 +3136,7 @@ const capabilities = {
         "consumes": [
           "RESEARCH.md"
         ],
+        "supportsFanOut": true,
         "when": "workflow.pattern_mapper",
         "onError": "skip"
       }
@@ -3551,6 +3554,7 @@ const capabilities = {
         "consumes": [
           "CONTEXT.md"
         ],
+        "supportsFanOut": true,
         "when": "workflow.research",
         "onError": "skip"
       }
@@ -3702,6 +3706,65 @@ const capabilities = {
         "onError": "halt"
       }
     ]
+  },
+  "swarm": {
+    "id": "swarm",
+    "role": "feature",
+    "version": "1.16.0",
+    "title": "Swarm fan-out",
+    "description": "Default-off, BETA. Fans the research, pattern-mapping and code-review steps out to a swarm of read-only Haiku-class workers (gsd-swarm-worker), each answering a very small, file-scoped question with file:line evidence, and has the step's own agent synthesize their answers into the unchanged RESEARCH.md, PATTERNS.md or REVIEW.md. Declares the fanOutStrategy core's `loop fan-out-plan` calls; changes only how those steps are dispatched, never whether they run or what they write. Every worker claim the synthesizer keeps carries a swarm-anchor that `swarm verify-anchors` checks against the source, pruning unverified claims loudly. ADR-5273, issue #5273.",
+    "tier": "full",
+    "requires": [],
+    "engines": {
+      "gsd": ">=1.16.0"
+    },
+    "runtimeCompat": {
+      "supported": [
+        "*"
+      ],
+      "unsupported": []
+    },
+    "skills": [],
+    "agents": [
+      "gsd-swarm-worker"
+    ],
+    "activationKey": "swarm.enabled",
+    "config": {
+      "swarm.enabled": {
+        "type": "boolean",
+        "default": false,
+        "description": "Master toggle for swarm fan-out (BETA). When false, research, pattern-mapping and code review dispatch their single agent exactly as before and no SWARM.json is written. ADR-5273."
+      },
+      "swarm.roles": {
+        "type": "string",
+        "default": "researcher,pattern-mapper,code-reviewer",
+        "description": "Comma-separated roles that fan out when swarm.enabled is true: any of researcher, pattern-mapper, code-reviewer. A role not listed dispatches its single agent quietly."
+      },
+      "swarm.max_workers": {
+        "type": "number",
+        "default": 20,
+        "description": "Most worker units one role run may fan out to. Integer, at least 2, no upper bound (ADR-5273 Decision 2). Research and pattern-mapping decompose into as many small units as this allows; code review groups files above it. A run dispatches at most max_workers + 3 agents. Each worker answer is capped at 4 KiB, so the synthesizer reads at most max_workers x 4 KiB of answers."
+      },
+      "swarm.max_concurrency": {
+        "type": "number",
+        "default": 20,
+        "description": "Most workers dispatched in one wave. Integer, at least 1. The effective concurrency is min(dispatch-capacity, swarm.max_concurrency, swarm.max_workers); below 2 the role runs single-agent with reason no_concurrency."
+      }
+    },
+    "commands": [
+      {
+        "family": "swarm",
+        "module": "swarm-command-router.cjs",
+        "router": "routeSwarmCommand"
+      }
+    ],
+    "fanOutStrategy": {
+      "command": "swarm plan"
+    },
+    "hooks": [],
+    "steps": [],
+    "contributions": [],
+    "gates": []
   },
   "tdd": {
     "id": "tdd",
@@ -4248,6 +4311,7 @@ const byAgent = {
   "gsd-user-profiler": "profile-pipeline",
   "gsd-phase-researcher": "research",
   "gsd-security-auditor": "security",
+  "gsd-swarm-worker": "swarm",
   "gsd-ui-checker": "ui",
   "gsd-ui-auditor": "ui"
 };
@@ -4352,6 +4416,7 @@ const byLoopPoint = {
         "consumes": [
           "CONTEXT.md"
         ],
+        "supportsFanOut": true,
         "when": "workflow.research",
         "onError": "skip"
       },
@@ -4386,6 +4451,7 @@ const byLoopPoint = {
         "consumes": [
           "RESEARCH.md"
         ],
+        "supportsFanOut": true,
         "when": "workflow.pattern_mapper",
         "onError": "skip"
       }
@@ -4582,6 +4648,7 @@ const byLoopPoint = {
           "REVIEW.md"
         ],
         "consumes": [],
+        "supportsFanOut": true,
         "supportsReviewerLanes": true,
         "when": "workflow.code_review",
         "pointFrom": "workflow.code_review_point",
@@ -4686,6 +4753,7 @@ const byLoopPoint = {
         "consumes": [
           "SUMMARY.md"
         ],
+        "supportsFanOut": true,
         "supportsReviewerLanes": true,
         "when": "workflow.code_review",
         "pointFrom": "workflow.code_review_point",
@@ -4938,6 +5006,10 @@ const configKeys = {
   "workflow.security_enforcement": "security",
   "workflow.security_asvs_level": "security",
   "workflow.security_block_on": "security",
+  "swarm.enabled": "swarm",
+  "swarm.roles": "swarm",
+  "swarm.max_workers": "swarm",
+  "swarm.max_concurrency": "swarm",
   "workflow.tdd_mode": "tdd",
   "workflow.ui_phase": "ui",
   "workflow.ui_review": "ui",
@@ -5468,6 +5540,30 @@ const configSchema = {
       "low",
       "none"
     ]
+  },
+  "swarm.enabled": {
+    "owner": "swarm",
+    "type": "boolean",
+    "default": false,
+    "description": "Master toggle for swarm fan-out (BETA). When false, research, pattern-mapping and code review dispatch their single agent exactly as before and no SWARM.json is written. ADR-5273."
+  },
+  "swarm.roles": {
+    "owner": "swarm",
+    "type": "string",
+    "default": "researcher,pattern-mapper,code-reviewer",
+    "description": "Comma-separated roles that fan out when swarm.enabled is true: any of researcher, pattern-mapper, code-reviewer. A role not listed dispatches its single agent quietly."
+  },
+  "swarm.max_workers": {
+    "owner": "swarm",
+    "type": "number",
+    "default": 20,
+    "description": "Most worker units one role run may fan out to. Integer, at least 2, no upper bound (ADR-5273 Decision 2). Research and pattern-mapping decompose into as many small units as this allows; code review groups files above it. A run dispatches at most max_workers + 3 agents. Each worker answer is capped at 4 KiB, so the synthesizer reads at most max_workers x 4 KiB of answers."
+  },
+  "swarm.max_concurrency": {
+    "owner": "swarm",
+    "type": "number",
+    "default": 20,
+    "description": "Most workers dispatched in one wave. Integer, at least 1. The effective concurrency is min(dispatch-capacity, swarm.max_concurrency, swarm.max_workers); below 2 the role runs single-agent with reason no_concurrency."
   },
   "workflow.tdd_mode": {
     "owner": "tdd",
@@ -8015,6 +8111,11 @@ const commandFamilies = {
     "module": "profile-pipeline-command-router.cjs",
     "router": "routeScanSessions"
   },
+  "swarm": {
+    "capId": "swarm",
+    "module": "swarm-command-router.cjs",
+    "router": "routeSwarmCommand"
+  },
   "write-profile": {
     "capId": "profile-pipeline",
     "module": "profile-pipeline-command-router.cjs",
@@ -8144,6 +8245,7 @@ const _requiresGraph = {
   "research": [],
   "schema-gate": [],
   "security": [],
+  "swarm": [],
   "tdd": [],
   "trae": [],
   "ui": [],

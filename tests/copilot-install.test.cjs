@@ -1446,7 +1446,7 @@ describe('E2E: Copilot full install verification', () => {
     const gsdAgents = files.filter(f => f.startsWith('gsd-') && f.endsWith('.agent.md')).sort();
     // #4407: each canonical agent now installs alongside its .compact.md variant
     // sibling (both real files on disk — see agents/*.compact.md), so the
-    // expected roster is derived from listAgentFiles() (35 canonical stems)
+    // expected roster is derived from listAgentFiles() (36 canonical stems)
     // rather than hand-listed, with each stem's .compact counterpart added
     // alongside it. A hand-typed 70-entry literal would be exactly the kind of
     // drift this test exists to catch, one level removed.

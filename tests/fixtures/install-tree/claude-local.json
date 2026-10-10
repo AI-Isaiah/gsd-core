@@ -30,6 +30,7 @@
   "agents/gsd-research-synthesizer.md",
   "agents/gsd-roadmapper.md",
   "agents/gsd-security-auditor.md",
+  "agents/gsd-swarm-worker.md",
   "agents/gsd-ui-auditor.md",
   "agents/gsd-ui-checker.md",
   "agents/gsd-ui-researcher.md",

@@ -598,7 +598,7 @@ describe('CLI: loop fan-out-plan', () => {
   let tmp;
   before(() => { tmp = createTempProject('gsd-fan-out-verb-'); });
   after(() => cleanup(tmp));
-  const base = ['loop', 'fan-out-plan', '--cap-id', 'research', '--point', 'plan:pre', '--agent', STEP_AGENT, '--phase', '1'];
+  const base = ['loop', 'fan-out-plan', '--cap-id', 'graphify', '--point', 'plan:pre', '--agent', STEP_AGENT, '--phase', '1'];
 
   test('a step without the trait answers a quiet single verdict and exits 0', () => {
     const r = runGsdTools(base, tmp, { HOME: tmp });
