@@ -59,6 +59,30 @@ export const PROMPT_MAX_BYTES = 32 * 1024;
 export const SCHEMA_MAX_BYTES = 8 * 1024;
 export const SCOPE_MAX_PATHS = 64;
 
+export type WorkerAnswerResult =
+  | { ok: true; bytes: number; answer: Record<string, unknown> }
+  | { ok: false; bytes: number; reason: 'answer_too_large' | 'not_json' | 'not_object' };
+
+/**
+ * ADR-5273 Decision 9: the one predicate for a worker's raw answer text before it may reach the
+ * synthesizer. Over `ANSWER_MAX_BYTES` UTF-8 bytes is dropped, never truncated, because a cut
+ * could split an anchor or a quote. The size check runs before parsing, so an oversized answer
+ * is never parsed. Validation against the dispatch's own `schema` stays with the executor.
+ */
+export function checkWorkerAnswer(text: unknown): WorkerAnswerResult {
+  if (typeof text !== 'string') return { ok: false, bytes: 0, reason: 'not_json' };
+  const bytes = byteLength(text);
+  if (bytes > ANSWER_MAX_BYTES) return { ok: false, bytes, reason: 'answer_too_large' };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, bytes, reason: 'not_json' };
+  }
+  if (!isPlainObject(parsed)) return { ok: false, bytes, reason: 'not_object' };
+  return { ok: true, bytes, answer: parsed };
+}
+
 export const FAN_OUT_STAGES = Object.freeze(['decompose', 'fan-out'] as const);
 export type FanOutStage = (typeof FAN_OUT_STAGES)[number];
 

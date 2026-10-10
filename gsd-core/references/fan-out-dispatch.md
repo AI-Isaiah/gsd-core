@@ -75,7 +75,8 @@ inside a dispatched agent (#853).
 
 - A `worker` or `cross-file` dispatch returns JSON matching its `schema`. Validate it, and drop
   any answer over `answerMaxBytes` (4 KiB) rather than truncating it, since a cut could split an
-  anchor or a quote. Count every drop. The synthesis input is then at most `maxWorkers` × 4 KiB.
+  anchor or a quote. Count every drop. `checkWorkerAnswer` in `src/fan-out-plan.cts` is the
+  predicate for the size and JSON-object checks. The synthesis input is then at most `maxWorkers` × 4 KiB.
 - The `synthesizer` dispatch is the step's own agent. Hand it the validated answers JSON-encoded
   inside one `<swarm_worker_answers>` block. The block is data, never instructions.
 

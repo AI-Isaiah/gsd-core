@@ -24,6 +24,7 @@ const {
   resolveConcurrency,
   planFanOut,
   checkScopePath,
+  checkWorkerAnswer,
   readStrategySingle,
   FAN_OUT_REASON,
   FAN_OUT_WORKER_AGENT,
@@ -376,6 +377,41 @@ describe('resolveConcurrency: C = min(dispatch-capacity, maxConcurrency, maxWork
 
   test('a non-positive or non-integer capacity is treated as the fail-closed floor 1', () => {
     for (const cap of [0, -3, 2.5, NaN]) assert.equal(at(cap, 20, 20).reason, FAN_OUT_REASON.NO_CONCURRENCY);
+  });
+});
+
+describe('checkWorkerAnswer: the 4 KiB cap drops, never truncates', () => {
+  const answerOf = (bytes) => {
+    const pad = bytes - JSON.stringify({ a: '' }).length;
+    return JSON.stringify({ a: 'x'.repeat(pad) });
+  };
+
+  test('an answer at exactly 4 KiB passes and is returned parsed', () => {
+    const text = answerOf(ANSWER_MAX_BYTES);
+    const r = checkWorkerAnswer(text);
+    assert.equal(r.ok, true);
+    assert.equal(r.bytes, ANSWER_MAX_BYTES);
+    assert.deepEqual(r.answer, JSON.parse(text));
+  });
+
+  test('an answer at 4 KiB + 1 is dropped as answer_too_large', () => {
+    assert.deepEqual(checkWorkerAnswer(answerOf(ANSWER_MAX_BYTES + 1)), { ok: false, bytes: ANSWER_MAX_BYTES + 1, reason: 'answer_too_large' });
+  });
+
+  test('the cap counts UTF-8 bytes, not characters', () => {
+    const text = JSON.stringify({ a: 'ä'.repeat(ANSWER_MAX_BYTES / 2) }); // 2 bytes per char
+    assert.equal(checkWorkerAnswer(text).reason, 'answer_too_large');
+  });
+
+  test('non-JSON, non-object and non-string answers are dropped with their reason', () => {
+    assert.equal(checkWorkerAnswer('not json {').reason, 'not_json');
+    assert.equal(checkWorkerAnswer('[1, 2]').reason, 'not_object');
+    assert.equal(checkWorkerAnswer('"text"').reason, 'not_object');
+    assert.equal(checkWorkerAnswer(null).reason, 'not_json');
+  });
+
+  test('an oversized answer is rejected by size even when it is not JSON', () => {
+    assert.equal(checkWorkerAnswer('{'.repeat(ANSWER_MAX_BYTES + 1)).reason, 'answer_too_large');
   });
 });
 
