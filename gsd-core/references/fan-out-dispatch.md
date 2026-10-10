@@ -7,7 +7,7 @@ whose step declares `supportsFanOut: true`. Every other site never calls the ver
 
 ```bash
 FANOUT=$(gsd_run loop fan-out-plan --cap-id <capId> --point <point> --agent <agent> \
-  --phase "$PHASE" [--stage decompose|fan-out] [--units <file>])
+  --phase "$PHASE" [--stage decompose|fan-out] [--units <file>] [--scope-file <file>])
 ```
 
 - `--agent` is the agent the site would dispatch single-agent. It is the only allowed synthesizer.
@@ -15,6 +15,8 @@ FANOUT=$(gsd_run loop fan-out-plan --cap-id <capId> --point <point> --agent <age
 - `--stage` defaults to `fan-out`. A strategy whose units need judgement is called twice:
   `--stage decompose` first, then `--stage fan-out --units <file>` with the decomposition's
   validated answer. The decomposition then counts against the role run's agent budget.
+- `--scope-file` carries the step's own input scope, one path per line (code-review's
+  `REVIEW_FILES`). Core forwards it to the strategy unread and books no dispatch for it.
 - A `single` verdict exits 0. Only malformed arguments exit non-zero.
 
 ## Verdict: `single`

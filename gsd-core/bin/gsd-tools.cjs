@@ -3309,7 +3309,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       if (v === undefined || v.startsWith('--')) error(`Missing value for --${name}`, ERROR_REASON.USAGE);
       return v;
     };
-    const usage = 'Usage: loop fan-out-plan --cap-id <id> --point <point> --agent <agent> --phase <n> [--stage decompose|fan-out] [--units <file>]';
+    const usage = 'Usage: loop fan-out-plan --cap-id <id> --point <point> --agent <agent> --phase <n> [--stage decompose|fan-out] [--units <file>] [--scope-file <file>]';
     const capId = valueOf('cap-id');
     const point = valueOf('point');
     const stepAgent = valueOf('agent');
@@ -3324,13 +3324,18 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     }
     if (!FAN_OUT_STAGES.includes(stage)) error(`--stage must be one of ${FAN_OUT_STAGES.join(', ')}. ${usage}`, ERROR_REASON.USAGE);
     if (stage === 'decompose' && unitsArg !== undefined) error(`--units is only valid with --stage fan-out. ${usage}`, ERROR_REASON.USAGE);
-    let unitsPath;
-    if (unitsArg !== undefined) {
-      unitsPath = path.resolve(cwd, unitsArg);
+    const regularFile = (name, value) => {
+      if (value === undefined) return undefined;
+      const resolvedPath = path.resolve(cwd, value);
       let st = null;
-      try { st = fs.statSync(unitsPath); } catch { st = null; }
-      if (!st || !st.isFile()) error(`--units file not found or not a regular file: ${unitsArg}`, ERROR_REASON.USAGE);
-    }
+      try { st = fs.statSync(resolvedPath); } catch { st = null; }
+      if (!st || !st.isFile()) error(`--${name} file not found or not a regular file: ${value}`, ERROR_REASON.USAGE);
+      return resolvedPath;
+    };
+    const unitsPath = regularFile('units', unitsArg);
+    // #5273: the step's own input scope (code-review's REVIEW_FILES, one path per line). Forwarded
+    // to the strategy unread; unlike --units it books no decomposition dispatch.
+    const scopeFilePath = regularFile('scope-file', valueOf('scope-file'));
 
     let resolved;
     try {
@@ -3353,6 +3358,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           const [family, sub] = strategy.command.split(' ');
           const argv = [__filename, family, sub, '--cap-id', capId, '--point', point, '--agent', stepAgent, '--phase', phaseArg, '--stage', stage];
           if (unitsPath !== undefined) argv.push('--units', unitsPath);
+          if (scopeFilePath !== undefined) argv.push('--scope-file', scopeFilePath);
           const cp = require('node:child_process');
           const r = cp.spawnSync(process.execPath, argv, { cwd, encoding: 'utf8', timeout: 120000, maxBuffer: 8 * 1024 * 1024 });
           if (r.error) return { ok: false, detail: `${strategy.command}: ${r.error.message}` };

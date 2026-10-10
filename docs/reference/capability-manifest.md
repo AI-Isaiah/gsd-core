@@ -152,7 +152,7 @@ prompts) belongs to the strategy.
 
 | Sub-field | Type | Required | Description |
 |---|---|---|---|
-| `command` | string | Yes | `"<family> <subcommand>"`, lowercase kebab-case, naming one of this capability's **own** `commands` families. It is run as `gsd_run <family> <subcommand> --cap-id <id> --point <point> --agent <agent> --phase <n> --stage <stage> [--units <file>]` and must print either a fan-out plan or `{ "mode": "single", "reason": "<code>" }`. |
+| `command` | string | Yes | `"<family> <subcommand>"`, lowercase kebab-case, naming one of this capability's **own** `commands` families. It is run as `gsd_run <family> <subcommand> --cap-id <id> --point <point> --agent <agent> --phase <n> --stage <stage> [--units <file>] [--scope-file <file>]` and must print either a fan-out plan or `{ "mode": "single", "reason": "<code>" }`. |
 
 `fanOutStrategy` is feature-role only (`role: "feature"`); it is not admissible on `role: "runtime"` or `role: "reviewer"` bodies. At most one capability may declare it.
 

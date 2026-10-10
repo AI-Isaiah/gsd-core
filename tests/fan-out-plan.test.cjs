@@ -612,6 +612,7 @@ describe('CLI: loop fan-out-plan', () => {
       [...base, '--stage', 'synthesize'],
       [...base, '--stage', 'decompose', '--units', 'u.json'],
       [...base, '--units', 'no-such-file.json'],
+      [...base, '--scope-file', 'no-such-files.txt'],
     ]) {
       const r = runGsdTools(argv, tmp, { HOME: tmp });
       assert.equal(r.success, false, argv.join(' '));
