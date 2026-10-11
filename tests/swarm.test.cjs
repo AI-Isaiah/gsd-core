@@ -23,10 +23,10 @@ const {
   groupReviewFiles,
   parseScopeFile,
   parseDiffRanges,
-  rangeLineCount,
-  packReviewUnits,
+  splitRanges,
+  reviewUnits,
+  groupUnits,
   REVIEW_UNIT_LINES,
-  REVIEW_UNIT_FILES,
   readUnits,
   buildSwarmPlan,
   checkAnswers,
@@ -68,10 +68,10 @@ function coreVerdict(p, stage, stepAgent, prior = 0) {
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 describe('readSwarmConfig', () => {
-  test('absent keys take the documented defaults: off, all three roles, 20 workers, 20 concurrency', () => {
+  test('absent keys take the documented defaults: off, all three roles, 50 workers, 20 concurrency', () => {
     const r = readSwarmConfig({ enabled: undefined, roles: undefined, maxWorkers: undefined, maxConcurrency: undefined });
-    assert.deepEqual(r, { ok: true, config: { enabled: false, roles: ['researcher', 'pattern-mapper', 'code-reviewer'], maxWorkers: 20, maxConcurrency: 20 } });
-    assert.deepEqual(SWARM_DEFAULTS, { maxWorkers: 20, maxConcurrency: 20 });
+    assert.deepEqual(r, { ok: true, config: { enabled: false, roles: ['researcher', 'pattern-mapper', 'code-reviewer'], maxWorkers: 50, maxConcurrency: 20 } });
+    assert.deepEqual(SWARM_DEFAULTS, { maxWorkers: 50, maxConcurrency: 20 });
   });
 
   test('max_workers has no upper bound; 1 is rejected, 2 and 10000 accepted', () => {
@@ -147,7 +147,7 @@ describe('groupReviewFiles', () => {
   });
 });
 
-describe('diff-scoped, packed review units (live-run lessons 2026-10-11)', () => {
+describe('diff-scoped review units, split to about 60 changed lines (live-run lessons 2026-10-11)', () => {
   const diff = [
     'diff --git a/src/a.ts b/src/a.ts',
     '--- a/src/a.ts',
@@ -167,38 +167,58 @@ describe('diff-scoped, packed review units (live-run lessons 2026-10-11)', () =>
 
   test('parseDiffRanges reads new-side hunks; a pure deletion marks its line; a deleted file is not listed', () => {
     assert.deepEqual(Object.fromEntries(parseDiffRanges(diff)), { 'src/a.ts': ['11-13', '44', '54'], 'src/b c.ts': ['1-120'] });
-    assert.deepEqual([rangeLineCount(['11-13', '44', '54']), rangeLineCount(['1-120'])], [5, 120]);
     assert.deepEqual(Object.fromEntries(parseDiffRanges('')), {});
   });
 
-  test('packing fills units up to the line budget and the file cap, in order', () => {
-    const files = Array.from({ length: 12 }, (_, i) => `f${i}`);
-    const units = packReviewUnits(files, () => 20, 20);
-    assert.deepEqual(units.map((u) => u.length), [5, 5, 2], 'the file cap closes a unit before the line budget');
-    assert.deepEqual(packReviewUnits(['big', 'a', 'b', 'c'], (f) => (f === 'big' ? 400 : 60), 20), [['big'], ['a', 'b'], ['c']]);
-    assert.deepEqual(units.flat(), files, 'every file once, in order');
-    assert.equal(REVIEW_UNIT_LINES, 150);
-    assert.equal(REVIEW_UNIT_FILES, 5);
+  test('splitRanges cuts at REVIEW_UNIT_LINES changed lines, splitting a long range, in order', () => {
+    assert.equal(REVIEW_UNIT_LINES, 60);
+    assert.deepEqual(splitRanges(['1-120']), [['1-60'], ['61-120']]);
+    assert.deepEqual(splitRanges(['1-130']), [['1-60'], ['61-120'], ['121-130']]);
+    assert.deepEqual(splitRanges(['11-13', '44', '54']), [['11-13', '44', '54']]);
+    assert.deepEqual(splitRanges(['1-50', '70-89', '100']), [['1-50', '70-79'], ['80-89', '100']]);
+    assert.deepEqual(splitRanges(['5'], 1), [['5']]);
   });
 
-  test('packing never drops below two units for two or more files, nor above max_workers', () => {
-    assert.deepEqual(packReviewUnits(['a', 'b', 'c'], () => 1, 20).length, 2);
-    const many = Array.from({ length: 30 }, (_, i) => `f${i}`);
-    assert.equal(packReviewUnits(many, () => 400, 20).length, 20);
+  test('reviewUnits never bundles files: one unit per file, more for a large change, whole file without ranges', () => {
+    const units = reviewUnits(['a', 'b', 'c'], { a: ['1-130'], b: ['7'] });
+    assert.deepEqual(units, [
+      { file: 'a', ranges: ['1-60'] }, { file: 'a', ranges: ['61-120'] }, { file: 'a', ranges: ['121-130'] },
+      { file: 'b', ranges: ['7'] },
+      { file: 'c', ranges: null },
+    ]);
+    assert.deepEqual(reviewUnits(['a', 'b'], undefined), [{ file: 'a', ranges: null }, { file: 'b', ranges: null }]);
   });
 
-  test('a diff-scoped plan lists each unit\'s changed lines and tells the worker to read around them', () => {
-    const changedLines = { [file(0)]: ['3-5'], [file(1)]: ['1'] };
-    const p = plan({ files: [file(0), file(1), file(2)], changedLines, lineCounts: { [file(0)]: 400, [file(1)]: 400, [file(2)]: 400 } });
-    const ws = p.stages[0].dispatches;
-    assert.deepEqual(ws.filter((d) => d.purpose === 'worker').map((d) => d.scope), [[file(0), file(1)], [file(2)]], '4 changed lines share a unit; a 400-line file with no ranges stands alone');
-    assert.match(ws[0].prompt, /<changed_lines>\nsrc\/f000.ts: 3-5\nsrc\/f001.ts: 1\n<\/changed_lines>/);
+  test('groupUnits keeps one unit per worker up to max_workers, then splits evenly in order', () => {
+    const units = Array.from({ length: 7 }, (_, i) => ({ file: `f${i}`, ranges: null }));
+    assert.deepEqual(groupUnits(units, 7).map((g) => g.length), [1, 1, 1, 1, 1, 1, 1]);
+    assert.deepEqual(groupUnits(units, 3).map((g) => g.length), [3, 2, 2]);
+    assert.deepEqual(groupUnits(units, 3).flat(), units);
+  });
+
+  test('a diff-scoped plan gives each worker its own ranges; one large file alone fans out', () => {
+    const changedLines = { [file(0)]: ['1-100'], [file(1)]: ['3'] };
+    const p = plan({ files: [file(0), file(1), file(2)], changedLines });
+    const ws = p.stages[0].dispatches.filter((d) => d.purpose === 'worker');
+    assert.deepEqual(ws.map((d) => d.scope), [[file(0)], [file(0)], [file(1)], [file(2)]]);
+    assert.match(ws[0].prompt, /<changed_lines>\nsrc\/f000.ts: 1-60\n<\/changed_lines>/);
+    assert.match(ws[1].prompt, /<changed_lines>\nsrc\/f000.ts: 61-100\n<\/changed_lines>/);
+    assert.match(ws[3].prompt, /src\/f002.ts: whole file/);
     assert.match(ws[0].prompt, /Read each file around those ranges/);
-    const whole = ws.find((d) => d.scope.includes(file(2)));
-    assert.match(whole.prompt, /src\/f002.ts: whole file/);
     assert.equal(coreVerdict(p, 'fan-out', 'gsd-code-reviewer'), 'ok');
+    const one = plan({ files: [file(0)], changedLines: { [file(0)]: ['1-100'] } });
+    assert.equal(one.mode, 'fan-out', 'a 100-line change in one file is two units');
+    assert.equal(plan({ files: [file(0)] }).reason, 'too_few_units', 'one file with no ranges is one unit');
     const noDiff = plan({ files: [file(0), file(1)] });
     assert.ok(!noDiff.stages[0].dispatches[0].prompt.includes('<changed_lines>'), 'no diff base, no block, no focus');
+  });
+
+  test('a grouped worker lists every unit it holds, merged per file', () => {
+    const changedLines = { [file(0)]: ['1-100'], [file(1)]: ['3'] };
+    const p = plan({ files: [file(0), file(1)], changedLines, config: config({ maxWorkers: 2 }) });
+    const ws = p.stages[0].dispatches.filter((d) => d.purpose === 'worker');
+    assert.deepEqual(ws.map((d) => d.scope), [[file(0)], [file(1)]], 'three units in two workers: both halves of f000 share one');
+    assert.match(ws[0].prompt, /src\/f000.ts: 1-60, 61-100/);
   });
 });
 
@@ -531,11 +551,11 @@ describe('CLI: loop fan-out-plan through the swarm strategy', () => {
     }
   });
 
-  test('tiny files share a unit, and --diff-base is forwarded through core (an unknown base reviews whole files)', () => {
+  test('tiny files are never bundled, and --diff-base is forwarded through core (an unknown base reviews whole files)', () => {
     setConfig({ swarm: { enabled: true } });
     fs.writeFileSync(path.join(tmp, 'tiny.txt'), [0, 1, 2, 3, 4, 5].map((i) => `src/tiny${i}.ts`).join('\n') + '\n');
     const r = run(['--cap-id', 'code-review', '--point', 'execute:post', '--agent', 'gsd-code-reviewer', '--phase', '1', '--scope-file', 'tiny.txt']);
-    assert.deepEqual(r.plan.stages[0].dispatches.filter((d) => d.purpose === 'worker').map((d) => d.scope.length), [5, 1]);
+    assert.deepEqual(r.plan.stages[0].dispatches.filter((d) => d.purpose === 'worker').map((d) => d.scope.length), [1, 1, 1, 1, 1, 1]);
     const d = run(['--cap-id', 'code-review', '--point', 'execute:post', '--agent', 'gsd-code-reviewer', '--phase', '1', '--scope-file', 'files.txt', '--diff-base', 'no-such-ref']);
     assert.equal(d.mode, 'fan-out');
     assert.ok(!d.plan.stages[0].dispatches[0].prompt.includes('<changed_lines>'), 'git could not answer: whole files');

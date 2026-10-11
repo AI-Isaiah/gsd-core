@@ -50,7 +50,7 @@ Plan-time reasons, in the order the verb checks them (the first miss wins):
 
 Plan validation runs before the concurrency rung because two of C's terms are the plan's own
 `maxConcurrency` and `maxWorkers`. The strategy writes them from `swarm.max_concurrency` and
-`swarm.max_workers` (both default 20); core never reads a `swarm.*` key.
+`swarm.max_workers` (defaults 20 and 50); core never reads a `swarm.*` key.
 `parallelization.max_concurrent_agents` plays no part.
 
 ## Verdict: `fan-out`

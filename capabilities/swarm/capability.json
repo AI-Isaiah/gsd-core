@@ -33,8 +33,8 @@
     },
     "swarm.max_workers": {
       "type": "number",
-      "default": 20,
-      "description": "Most worker units one role run may fan out to. Integer, at least 2, no upper bound (ADR-5273 Decision 2). Research and pattern-mapping decompose into as many small units as this allows; code review groups files above it. A run dispatches at most max_workers + 3 agents. Each worker answer is capped at 4 KiB, so the synthesizer reads at most max_workers x 4 KiB of answers."
+      "default": 50,
+      "description": "Most worker units one role run may fan out to. Integer, at least 2, no upper bound (ADR-5273 Decision 2). Research and pattern-mapping decompose into as many small units as this allows; code review splits the change into units of about 60 changed lines and groups them above it. A run dispatches at most max_workers + 3 agents. Each worker answer is capped at 4 KiB, so the synthesizer reads at most max_workers x 4 KiB of answers."
     },
     "swarm.max_concurrency": {
       "type": "number",
