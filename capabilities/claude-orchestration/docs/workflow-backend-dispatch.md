@@ -268,6 +268,15 @@ dispatch — the default, byte-identical-to-today path. `onError: skip` on this
 contribution means a `resolve-wave-dispatch` command failure is treated exactly
 like an `inline` result, never as a fatal wave error.
 
+## One renderer for waves and fan-out stages (ADR-5273 step 5)
+
+`emitWorkflowScript` is now an adapter plus a renderer: `wavesToFanOutPlan` maps waves to a
+renderable plan (wave → phase, `files_modified` overlap → stages, plan → one `gsd-executor`
+dispatch with `isolation: "worktree"` unless `use_worktree` is `false`, and the
+`worktree_metadata` result contract), and `renderFanOutPlan` emits the script. The wave output is
+byte-identical to before. `render-fan-out` renders one stage of a swarm fan-out plan through the
+same renderer. It is for inspection only; this contribution does not run it (see #4747 item E).
+
 ## Fallback contract
 
 Detection is fail-closed end-to-end: capability disabled, non-Claude runtime,

@@ -38,6 +38,13 @@
  *       Fail-closed identically to detect-backend/emit-workflow individually —
  *       any gate miss, or an emit failure on a malformed --waves manifest,
  *       resolves to 'inline' with no script.
+ *
+ *   render-fan-out --verdict <path> --stage <id> --run-id <id>
+ *       ADR-5273 step 5 — renders one stage of a `loop fan-out-plan` verdict
+ *       (`mode: "fan-out"`) as a Workflow script through the same renderer the
+ *       waves use, in batches of the verdict's `concurrency.c`. Emits
+ *       { script, summary }. For inspection: no route runs the script yet
+ *       (#4747 item E).
  */
 
 import fs from 'node:fs';
@@ -52,9 +59,10 @@ import configLoader = require('./config-loader.cjs');
 import runtimeSlash = require('./runtime-slash.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- model-resolver.cjs is an export= CommonJS module
 import modelResolver = require('./model-resolver.cjs');
+import type { RenderablePlan } from './fan-out-plan.cjs';
 
 const { output } = io;
-const { detectWorkflowBackend, emitWorkflowScript, resolveWaveDispatch } = core;
+const { detectWorkflowBackend, emitWorkflowScript, resolveWaveDispatch, renderFanOutStage } = core;
 
 const CAPABLE_HOST = { dispatch: { nested: true, background: true } };
 
@@ -67,10 +75,11 @@ interface RouterOpts {
 
 function usage(error: (msg: string, reason?: string) => void): void {
   error(
-    'Usage: gsd-tools claude-orchestration <detect-backend|emit-workflow|resolve-wave-dispatch> [...]\n' +
+    'Usage: gsd-tools claude-orchestration <detect-backend|emit-workflow|resolve-wave-dispatch|render-fan-out> [...]\n' +
     '  detect-backend [--runtime <id>] [--agent-sdk-version <ver>] [--no-nested-dispatch]\n' +
     '  emit-workflow --waves <path> --run-id <id> [--phase-dir <dir>] [--budget <n>] [--executor-model <id>]\n' +
-    '  resolve-wave-dispatch --waves <path> --run-id <id> [--runtime <id>] [--agent-sdk-version <ver>] [--no-nested-dispatch] [--phase-dir <dir>] [--budget <n>] [--executor-model <id>]',
+    '  resolve-wave-dispatch --waves <path> --run-id <id> [--runtime <id>] [--agent-sdk-version <ver>] [--no-nested-dispatch] [--phase-dir <dir>] [--budget <n>] [--executor-model <id>]\n' +
+    '  render-fan-out --verdict <path> --stage <id> --run-id <id>',
   );
 }
 
@@ -316,6 +325,43 @@ function cmdResolveWaveDispatch(args: string[], cwd: string, raw: boolean, error
   output(result, raw);
 }
 
+/**
+ * ADR-5273 step 5 — render one stage of a `loop fan-out-plan` verdict as a Workflow script.
+ * Inspection only until #4747 item E wires a route.
+ */
+function cmdRenderFanOut(args: string[], raw: boolean, error: (msg: string, reason?: string) => void): void {
+  const verdictPath = argValue(args, '--verdict');
+  const stageId = argValue(args, '--stage');
+  const runId = argValue(args, '--run-id');
+  if (!verdictPath || !stageId || !runId) {
+    error('render-fan-out requires --verdict <path> --stage <id> --run-id <id>');
+    return;
+  }
+  let verdict: Record<string, unknown>;
+  try {
+    verdict = JSON.parse(fs.readFileSync(path.resolve(verdictPath), 'utf8')) as Record<string, unknown>;
+  } catch (e) {
+    error('render-fan-out: could not read/parse --verdict file "' + verdictPath + '": ' + (e instanceof Error ? e.message : String(e)));
+    return;
+  }
+  if (verdict === null || typeof verdict !== 'object' || verdict['mode'] !== 'fan-out') {
+    error('render-fan-out: --verdict must hold a loop fan-out-plan verdict with mode "fan-out"');
+    return;
+  }
+  const concurrency = verdict['concurrency'] as { c?: unknown } | undefined;
+  const result = renderFanOutStage({
+    plan: verdict['plan'] as RenderablePlan,
+    stageId,
+    concurrency: concurrency !== null && typeof concurrency === 'object' ? (concurrency.c as number) : Number.NaN,
+    runId,
+  });
+  if (!result.ok) {
+    error('render-fan-out: ' + result.reason);
+    return;
+  }
+  output({ script: result.script, summary: result.summary }, raw);
+}
+
 // Re-declared minimal input type for the cast above (avoids importing private types).
 interface EmitInput {
   waves: Array<{ id: string; plans: Array<{ id: string; brief: string; files_modified: string[]; use_worktree?: boolean }> }>;
@@ -331,6 +377,8 @@ function routeClaudeOrchestrationCommand(opts: RouterOpts): void {
     cmdEmitWorkflow(args, cwd, raw, error);
   } else if (subcommand === 'resolve-wave-dispatch') {
     cmdResolveWaveDispatch(args, cwd, raw, error);
+  } else if (subcommand === 'render-fan-out') {
+    cmdRenderFanOut(args, raw, error);
   } else {
     usage(error);
   }

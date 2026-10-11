@@ -147,6 +147,44 @@ export interface FanOutPlan {
   stages: FanOutPlanStage[];
 }
 
+/**
+ * The executor-only extension of the plan schema (ADR-5273 Decision 1, implementation step 5).
+ * Only an executor's own adapter builds these (execute-phase's waves, through
+ * `wavesToFanOutPlan` in `claude-orchestration.cts`); `validateFanOutPlan` rejects every one of
+ * these fields on a plan a `fanOutStrategy` command returns, so a strategy can never ask for a
+ * worktree or a result contract.
+ */
+export interface RenderableDispatch {
+  /** `execute` is the wave adapter's purpose: one `gsd-executor` dispatch per plan. */
+  purpose: DispatchPurpose | 'execute';
+  agentType: string;
+  /** Resolved model; anything not emittable (`inherit`, empty, not a string) is omitted. */
+  model: unknown;
+  tier?: string;
+  prompt: string;
+  schema?: Record<string, unknown> | null;
+  scope?: string[];
+  /** Names the dispatch in the rendered result (a wave's plan id). */
+  id?: string;
+  /** Executor-only: run the dispatch in its own git worktree. */
+  isolation?: 'worktree';
+  /** Executor-only: the result carries a `<worktree_metadata>` block the script extracts. */
+  resultContract?: 'worktree_metadata';
+}
+
+export interface RenderableStage {
+  id: string;
+  /** The Workflow progress group this stage belongs to; defaults to the stage `id`. */
+  phase?: string;
+  /** One comment line rendered above the stage, without the `//`. */
+  comment?: string;
+  dispatches: RenderableDispatch[];
+}
+
+export interface RenderablePlan {
+  stages: RenderableStage[];
+}
+
 export interface ValidateFanOutPlanContext {
   /** Which `--stage` call this plan answers. */
   stage: FanOutStage;

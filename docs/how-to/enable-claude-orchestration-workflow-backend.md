@@ -125,6 +125,17 @@ The output is a generated Workflow script that maps GSD's model 1:1 onto Workflo
 
 Because the script composes the same `gsd-executor` agent + worktree isolation + `SUMMARY.md` artifact as the inline path, the artifacts and commits it produces are identical — only the execution vehicle differs.
 
+### Render a swarm fan-out stage (inspection)
+
+The same renderer also turns one stage of a swarm fan-out plan ([ADR-5273](../adr/5273-swarm-fan-out-capability.md)) into a Workflow script. Save the verdict of `gsd-tools loop fan-out-plan …` to a file, then:
+
+```bash
+gsd-tools claude-orchestration render-fan-out \
+  --verdict verdict.json --stage workers --run-id swarm-review-01
+```
+
+The script runs the stage's workers in `parallel()` batches of at most the verdict's `concurrency.c`. It returns one `{ purpose, text }` per worker, in plan order, which is the input `gsd-tools swarm check-answers --answers` reads. The synthesizer stage is refused, because its prompt is completed only after the answers are checked, so it always runs inline. The Workflow tool advises fewer than 10 agents per script (`workflowSizeGuideline`), so raise that guideline for a larger stage. No GSD workflow runs this script yet: which route may do so is item E of [#4747](https://github.com/open-gsd/gsd-core/issues/4747), and it is still undecided. Swarm runs inline until then.
+
 ### Run the emitted script
 
 Feed the emitted script to Claude Code's Workflow tool (`/effort ultracode`, or an Agent SDK `Workflow` invocation), **passing `summary.resumeRunId` as the tool's `resumeFromRunId` input**. The orchestrator runs it; each `agent()` call spawns a `gsd-executor` in its own worktree, and waves barrier between each other. Omitting that input silently regresses phase-resume to a no-op — an interrupted phase re-runs completed plans.

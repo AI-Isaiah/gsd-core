@@ -46,6 +46,14 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- file-overlap-partitioner.cjs is an export= CommonJS module
 import fileOverlapPartitionerMod = require('./file-overlap-partitioner.cjs');
 const { partitionByFileOverlap } = fileOverlapPartitionerMod;
+import type { RenderableDispatch, RenderablePlan, RenderableStage } from './fan-out-plan.cjs';
+import { EXECUTOR_ONLY_FIELDS } from './fan-out-plan.cjs';
+
+/**
+ * Dispatch fields a strategy's fan-out plan may never carry into a render: core's executor-only
+ * fields plus `id`, which only the wave adapter sets (it names a plan in the worktree result).
+ */
+const FAN_OUT_REFUSED_DISPATCH_FIELDS: readonly string[] = [...EXECUTOR_ONLY_FIELDS, 'id'];
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -385,17 +393,17 @@ function emittableModel(executorModel: unknown): string | undefined {
 }
 
 /**
- * Render the `agent()` options object for a single plan — `isolation: "worktree"`
- * ONLY when the plan's `use_worktree` is not explicitly `false` (#2772 / #2285
- * finding 1). This is the single place that decides worktree isolation for the
- * Workflow backend; it must never diverge from the inline path's per-plan gate.
+ * Render the `agent()` options object for one dispatch. `isolation: "worktree"` is emitted only
+ * when the dispatch carries it, and only `wavesToFanOutPlan` sets it, from a plan's
+ * `use_worktree` (#2772 / #2285 finding 1): that adapter is the single place that decides worktree
+ * isolation for the Workflow backend, and it must never diverge from the inline path's per-plan gate.
  */
-function agentOptions(p: Plan, executorModel?: unknown): string {
-  const parts = ['agentType: "gsd-executor"'];
-  if (p.use_worktree !== false) parts.push('isolation: "worktree"');
-  // #2686: carry the resolved executor model so this backend honors
-  // model_overrides / model_policy / model_profile exactly as the inline path.
-  const model = emittableModel(executorModel);
+function dispatchOptions(d: RenderableDispatch): string {
+  const parts = ['agentType: ' + quoteString(d.agentType)];
+  if (d.isolation === 'worktree') parts.push('isolation: "worktree"');
+  // #2686: carry the resolved model so this backend honors model_overrides / model_policy /
+  // model_profile exactly as the inline path.
+  const model = emittableModel(d.model);
   if (model !== undefined) parts.push('model: ' + quoteString(model));
   return '{ ' + parts.join(', ') + ' }';
 }
@@ -413,6 +421,349 @@ const UNSCRIPTABLE_CHAR_RE = /[\r\n"\\\x00-\x1f\x7f\u2028\u2029]/;
 function isScriptableIdentifier(s: unknown): boolean {
   if (typeof s !== 'string' || s.length === 0) return false;
   return !UNSCRIPTABLE_CHAR_RE.test(s);
+}
+
+// ─── renderFanOutPlan / wavesToFanOutPlan (ADR-5273 Decision 1, step 5) ─────
+
+/** A line terminator ends a `//` comment, so text bound for a comment may carry none. */
+const LINE_TERMINATOR_RE = /[\r\n\u2028\u2029]/;
+
+interface RenderPhase {
+  title: string;
+  detail: string;
+}
+
+interface RenderOptions {
+  /** `meta.name` of the script. */
+  name: string;
+  /** `meta.description` of the script. */
+  description: string;
+  /** Header comment lines, without the `//`. An empty string renders a bare `//`. */
+  header: string[];
+  /**
+   * `meta.phases`, in order. Every stage names one of them through `phase` (default: its `id`).
+   * When absent, each distinct stage phase becomes one, with a dispatch count as its detail.
+   */
+  phases?: RenderPhase[];
+  /**
+   * The most `agent()` calls one `parallel()` barrier may hold. A larger stage is rendered as
+   * sequential batches. Absent: one barrier per stage, however large.
+   */
+  concurrency?: number;
+}
+
+type RenderResult = { ok: true; script: string } | { ok: false; reason: string };
+
+/**
+ * The one Workflow-script emitter (ADR-5273 Decision 1). It decides nothing about what to
+ * dispatch: the plan's owner does (execute-phase's waves through `wavesToFanOutPlan`, a swarm
+ * strategy's fan-out plan as `loop fan-out-plan` returned it). Pure and deterministic. Every
+ * value it interpolates outside a string literal is checked first, so a hostile id or comment
+ * cannot become live script.
+ *
+ * Each dispatch result is returned to the orchestrator: a `worktree_metadata` dispatch as
+ * `{ plan, expects_worktree, metadata }` (#3302), any other as `{ purpose, text }`, the shape
+ * `swarm check-answers --answers` reads.
+ */
+function renderFanOutPlan(plan: RenderablePlan | null | undefined, opts: RenderOptions | null | undefined): RenderResult {
+  if (plan === null || plan === undefined || typeof plan !== 'object' || !Array.isArray(plan.stages) || plan.stages.length === 0) {
+    return { ok: false, reason: 'plan must have a non-empty stages array' };
+  }
+  if (opts === null || opts === undefined || typeof opts !== 'object') return { ok: false, reason: 'invalid_options' };
+  if (typeof opts.name !== 'string' || typeof opts.description !== 'string') return { ok: false, reason: 'name and description must be strings' };
+  if (!Array.isArray(opts.header) || opts.header.some((h) => typeof h !== 'string' || LINE_TERMINATOR_RE.test(h))) {
+    return { ok: false, reason: 'header must be an array of single-line strings' };
+  }
+  const concurrency = opts.concurrency;
+  if (concurrency !== undefined && (!Number.isSafeInteger(concurrency) || concurrency < 1)) {
+    return { ok: false, reason: 'concurrency must be a positive integer if present' };
+  }
+
+  // Group stages by phase. A phase's stages must be contiguous, or its progress group would split.
+  const groups: Array<{ title: string; stages: RenderableStage[] }> = [];
+  for (let si = 0; si < plan.stages.length; si++) {
+    const st = plan.stages[si];
+    if (st === null || typeof st !== 'object' || !isScriptableIdentifier(st.id)) {
+      return { ok: false, reason: 'stages[' + si + '].id must be a non-empty string without newlines/quotes/backslash/control chars' };
+    }
+    const title = st.phase === undefined ? st.id : st.phase;
+    if (!isScriptableIdentifier(title)) return { ok: false, reason: 'stages[' + si + '].phase must not contain newlines/quotes/backslash/control chars' };
+    if (st.comment !== undefined && (typeof st.comment !== 'string' || LINE_TERMINATOR_RE.test(st.comment))) {
+      return { ok: false, reason: 'stages[' + si + '].comment must be a single-line string' };
+    }
+    if (!Array.isArray(st.dispatches) || st.dispatches.length === 0) return { ok: false, reason: 'stages[' + si + '] must have a non-empty dispatches array' };
+    for (let di = 0; di < st.dispatches.length; di++) {
+      const d = st.dispatches[di];
+      const at = 'stages[' + si + '].dispatches[' + di + ']';
+      if (d === null || typeof d !== 'object' || typeof d.prompt !== 'string' || !isScriptableIdentifier(d.agentType) || !isScriptableIdentifier(d.purpose)) {
+        return { ok: false, reason: at + ' must be { purpose, agentType, prompt } with scriptable purpose and agentType' };
+      }
+      if (typeof d.model === 'string' && UNSCRIPTABLE_CHAR_RE.test(d.model)) {
+        return { ok: false, reason: at + '.model must not contain newlines/quotes/backslash/control/line-separator chars' };
+      }
+      if (d.isolation !== undefined && d.isolation !== 'worktree') return { ok: false, reason: at + '.isolation must be "worktree" if present' };
+      if (d.resultContract !== undefined && d.resultContract !== 'worktree_metadata') {
+        return { ok: false, reason: at + '.resultContract must be "worktree_metadata" if present' };
+      }
+      if (d.resultContract === 'worktree_metadata' && !isScriptableIdentifier(d.id)) {
+        return { ok: false, reason: at + '.id is required, and must be scriptable, for a worktree_metadata result' };
+      }
+    }
+    const last = groups[groups.length - 1];
+    if (last !== undefined && last.title === title) {
+      last.stages.push(st);
+    } else {
+      if (groups.some((g) => g.title === title)) return { ok: false, reason: 'phase "' + title + '" is split by another phase; its stages must be contiguous' };
+      groups.push({ title, stages: [st] });
+    }
+  }
+
+  let phases: RenderPhase[];
+  if (opts.phases === undefined) {
+    phases = groups.map((g) => ({ title: g.title, detail: g.stages.reduce((n, st) => n + st.dispatches.length, 0) + ' dispatch(es)' }));
+  } else {
+    if (!Array.isArray(opts.phases) || opts.phases.length !== groups.length
+      || opts.phases.some((ph, i) => ph === null || typeof ph !== 'object' || ph.title !== groups[i].title || typeof ph.detail !== 'string')) {
+      return { ok: false, reason: 'phases must list every stage phase once, in stage order, each with a string detail' };
+    }
+    phases = opts.phases;
+  }
+
+  const lines: string[] = [];
+  // `export const meta = {…}` MUST be the first statement in the script — the
+  // Workflow tool rejects the whole script otherwise (#2590). Leading comments
+  // are not statements, but the meta block is emitted first regardless so the
+  // contract holds under the strictest reading of "first statement".
+  //
+  // meta.phases must be a PURE LITERAL (no variables, calls, spreads, or
+  // template interpolation), and its titles are matched EXACTLY against the
+  // phase() calls emitted below.
+  lines.push('export const meta = {');
+  lines.push('  name: ' + quoteString(opts.name) + ',');
+  lines.push('  description: ' + quoteString(opts.description) + ',');
+  lines.push('  phases: [');
+  for (const ph of phases) {
+    lines.push('    { title: ' + quoteString(ph.title) + ', detail: ' + quoteString(ph.detail) + ' },');
+  }
+  lines.push('  ],');
+  lines.push('}');
+  lines.push('');
+  for (const h of opts.header) lines.push(h === '' ? '//' : '// ' + h);
+  lines.push('');
+
+  const wantsMetadata = plan.stages.some((st) => st.dispatches.some((d) => d.resultContract === 'worktree_metadata'));
+  if (wantsMetadata) {
+    // #3302: the generated script must hand the per-agent executor results back
+    // to the orchestrator so it can feed the wave merge chain: a helper that
+    // extracts the executor's <worktree_metadata> JSON (agents/gsd-executor.md
+    // <worktree_metadata_capture>) from one agent() result. `metadata` is null
+    // when the result carried no parseable block — the LOUD-failure input the
+    // orchestrator halts on for expects_worktree plans (never a silent skip).
+    lines.push('// #3302: extract the executor-returned <worktree_metadata> JSON so the');
+    lines.push('// orchestrator can record it into WAVE_WORKTREE_MANIFEST after the run');
+    lines.push('// (worktree.record-agent -> worktree.cleanup-wave, the same manifest-scoped');
+    lines.push('// merge chain inline dispatch feeds). null = absent/unparseable/interrupted.');
+    lines.push('function gsdWorktreeMetadata(agentResult) {');
+    lines.push('  if (typeof agentResult !== \'string\') return null;');
+    lines.push('  const m = agentResult.match(/<worktree_metadata>([\\s\\S]*?)<\\/worktree_metadata>/);');
+    lines.push('  if (m === null) return null;');
+    lines.push('  try {');
+    lines.push('    const parsed = JSON.parse(m[1]);');
+    lines.push('    return (parsed !== null && typeof parsed === \'object\') ? parsed : null;');
+    lines.push('  } catch (e) {');
+    lines.push('    return null;');
+    lines.push('  }');
+    lines.push('}');
+  }
+  lines.push('const gsdAgentOutcomes = [];');
+  lines.push('');
+
+  for (let pi = 0; pi < groups.length; pi++) {
+    const group = groups[pi];
+    lines.push('// ' + group.title);
+    // Title must match this phase's meta.phases entry EXACTLY.
+    lines.push('phase(' + quoteString(group.title) + ')');
+    for (let si = 0; si < group.stages.length; si++) {
+      const st = group.stages[si];
+      if (st.comment !== undefined) lines.push('// ' + st.comment);
+      const batchSize = concurrency === undefined ? st.dispatches.length : concurrency;
+      const batches: RenderableDispatch[][] = [];
+      for (let b = 0; b < st.dispatches.length; b += batchSize) batches.push(st.dispatches.slice(b, b + batchSize));
+      for (let bi = 0; bi < batches.length; bi++) {
+        const batch = batches[bi];
+        const name = 'gsdStage_' + pi + '_' + si + (batches.length > 1 ? '_' + bi : '');
+        // parallel() takes an ARRAY OF THUNKS — `parallel(agent(…), agent(…))`
+        // threw "parallel() expects an array of functions" (#2590). Passing
+        // agent() results directly would also start every agent eagerly, before
+        // parallel() could bound concurrency.
+        // #3302: capture the barrier's resolved results (one per thunk, in thunk
+        // order — the documented parallel() contract) so each dispatch's outcome
+        // can be tagged and returned below.
+        lines.push('const ' + name + ' = await parallel([');
+        // A dispatch's `schema` is deliberately NOT passed to agent(): with a schema the Workflow
+        // tool returns a parsed object, and the `{ purpose, text }` result must carry the raw text
+        // `swarm check-answers` size-checks and parses itself (checkWorkerAnswer rejects a
+        // non-string). The schema already rides inside the prompt's <schema> block.
+        for (const d of batch) {
+          lines.push('  () => agent(' + quoteString(d.prompt) + ', ' + dispatchOptions(d) + '),');
+        }
+        lines.push('])');
+        // Positional tagging is decided at RENDER time from the validated plan,
+        // so attribution survives out-of-order completion and needs no runtime
+        // introspection.
+        lines.push('gsdAgentOutcomes.push(');
+        for (let di = 0; di < batch.length; di++) {
+          const d = batch[di];
+          const tail = di < batch.length - 1 ? ',' : '';
+          const result = name + '[' + di + ']';
+          if (d.resultContract === 'worktree_metadata') {
+            lines.push('  { plan: ' + quoteString(d.id as string) + ', expects_worktree: ' + (d.isolation === 'worktree') + ', metadata: gsdWorktreeMetadata(' + result + ') }' + tail);
+          } else {
+            lines.push('  { purpose: ' + quoteString(d.purpose) + ', text: ' + result + ' }' + tail);
+          }
+        }
+        lines.push(')');
+      }
+    }
+    if (pi < groups.length - 1) lines.push('');
+  }
+
+  // #3302: the script's top-level return value is what the Workflow tool hands
+  // back to the orchestrator: one entry per dispatch, in plan order.
+  lines.push('return gsdAgentOutcomes');
+
+  return { ok: true, script: lines.join('\n') };
+}
+
+interface WavesToFanOutPlanResult {
+  plan: RenderablePlan;
+  phases: RenderPhase[];
+  stagesByWave: string[][][];
+  plans: number;
+  worktreePlans: number;
+}
+
+/**
+ * The wave adapter (ADR-5273 Decision 1): execute-phase's waves as a renderable plan. Each wave
+ * is one phase, `partitionStages` splits it into sequential stages on `files_modified` overlap,
+ * and each plan becomes one `gsd-executor` dispatch with the `worktree_metadata` result contract
+ * and, unless its `use_worktree` is `false`, worktree isolation. Expects waves `emitWorkflowScript`
+ * has already validated.
+ */
+function wavesToFanOutPlan(waves: Wave[], executorModel?: unknown): WavesToFanOutPlanResult {
+  const stages: RenderableStage[] = [];
+  const phases: RenderPhase[] = [];
+  const stagesByWave: string[][][] = [];
+  let plans = 0;
+  let worktreePlans = 0;
+  for (const wave of waves) {
+    const title = 'Wave ' + wave.id;
+    phases.push({ title, detail: wave.plans.length + ' plan(s)' });
+    const partition = partitionStages(wave.plans);
+    stagesByWave.push(partition);
+    plans += wave.plans.length;
+    for (let si = 0; si < partition.length; si++) {
+      // Resolve back to plan objects for briefs (ids are unique within a wave — validated).
+      const stagePlans = partition[si].map((id) => wave.plans.find((p) => p.id === id) as Plan);
+      const stage: RenderableStage = {
+        id: wave.id + '-' + si,
+        phase: title,
+        dispatches: stagePlans.map((p): RenderableDispatch => {
+          const d: RenderableDispatch = {
+            purpose: 'execute',
+            agentType: 'gsd-executor',
+            model: executorModel,
+            prompt: p.brief,
+            id: p.id,
+            resultContract: 'worktree_metadata',
+          };
+          if (p.use_worktree !== false) {
+            d.isolation = 'worktree';
+            worktreePlans += 1;
+          }
+          return d;
+        }),
+      };
+      if (partition.length > 1) stage.comment = 'Stage ' + si + (si > 0 ? ' (sequential — files_modified overlap)' : '');
+      stages.push(stage);
+    }
+  }
+  return { plan: { stages }, phases, stagesByWave, plans, worktreePlans };
+}
+
+interface FanOutStageInput {
+  /** The `plan` of a `loop fan-out-plan` verdict with `mode: "fan-out"`. */
+  plan: RenderablePlan;
+  /** The id of the one stage to render. */
+  stageId: string;
+  /** The verdict's `concurrency.c`: the most agents one barrier holds. */
+  concurrency: number;
+  runId: string;
+}
+
+type FanOutStageResult =
+  | { ok: true; script: string; summary: { stage: string; dispatches: number; batches: number; resumeRunId: string } }
+  | { ok: false; reason: string };
+
+/**
+ * ADR-5273 step 5: one stage of a strategy's fan-out plan (from `loop fan-out-plan`) as a
+ * Workflow script, through the same `renderFanOutPlan` the waves use. The script returns one
+ * `{ purpose, text }` per dispatch in plan order, the array `swarm check-answers --answers` reads.
+ *
+ * One stage per script, because the orchestrator works between stages: it checks the worker
+ * answers and fills the synthesizer's answer slot. A `synthesizer` stage is therefore refused, and
+ * so is any executor-only field, which a strategy's plan may never carry. Batches hold at most
+ * `concurrency` agents. Which route runs the script is #4747 item E's decision; nothing here
+ * invokes the Workflow tool.
+ */
+function renderFanOutStage(input: FanOutStageInput | null | undefined): FanOutStageResult {
+  if (input === null || input === undefined || typeof input !== 'object') return { ok: false, reason: 'invalid_input' };
+  const { plan, stageId, concurrency, runId } = input;
+  if (!isScriptableIdentifier(runId)) return { ok: false, reason: 'runId must be a non-empty string without newlines/quotes/backslash/control chars' };
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) return { ok: false, reason: 'concurrency must be a positive integer' };
+  if (plan === null || typeof plan !== 'object' || !Array.isArray(plan.stages)) return { ok: false, reason: 'plan must have a stages array' };
+  const stage = plan.stages.find((st) => st !== null && typeof st === 'object' && st.id === stageId);
+  if (stage === undefined) return { ok: false, reason: 'plan has no stage "' + String(stageId) + '"' };
+  if (!Array.isArray(stage.dispatches)) return { ok: false, reason: 'stage "' + stageId + '" has no dispatches array' };
+  for (const d of stage.dispatches) {
+    if (d === null || typeof d !== 'object') return { ok: false, reason: 'stage "' + stageId + '" holds a dispatch that is not an object' };
+    if (d.purpose === 'synthesizer') {
+      return { ok: false, reason: 'a synthesizer stage is not rendered: its prompt is completed between stages, so it runs inline' };
+    }
+    for (const k of FAN_OUT_REFUSED_DISPATCH_FIELDS) {
+      if ((d as unknown as Record<string, unknown>)[k] !== undefined) {
+        return { ok: false, reason: 'a fan-out plan dispatch may not carry the executor-only field ' + k };
+      }
+    }
+  }
+  const rendered = renderFanOutPlan({ stages: [{ id: stage.id, dispatches: stage.dispatches }] }, {
+    name: 'gsd-fan-out-' + runId,
+    description: 'GSD fan-out stage ' + stage.id,
+    header: [
+      'GSD Workflow script — one fan-out stage (ADR-5273), rendered by claude-orchestration',
+      'BETA: on any failure the orchestrator runs the stage inline instead.',
+      'Returns one { purpose, text } per dispatch, in plan order: the swarm check-answers input.',
+      'Each agent() gets no schema option, so its result stays the raw text check-answers checks;',
+      'the schema is in the prompt. Batches hold at most ' + concurrency + ' agents.',
+      'Size: the Workflow tool advises fewer than 10 agents per script (workflowSizeGuideline);',
+      'raise that guideline for a larger stage (ADR-5273 Decision 2).',
+      '',
+      'resume: pass ' + quoteString(runId) + ' as the Workflow tool\'s resumeFromRunId input',
+      '(it is a tool parameter, NOT a script function).',
+    ],
+    concurrency,
+  });
+  if (!rendered.ok) return rendered;
+  return {
+    ok: true,
+    script: rendered.script,
+    summary: {
+      stage: stage.id,
+      dispatches: stage.dispatches.length,
+      batches: Math.ceil(stage.dispatches.length / concurrency),
+      resumeRunId: runId,
+    },
+  };
 }
 
 /**
@@ -501,32 +852,14 @@ function emitWorkflowScript(input: EmitInput | null | undefined): EmitOk | EmitE
     ? Math.floor(input.budgetTokens)
     : null;
 
-  const lines: string[] = [];
-  // `export const meta = {…}` MUST be the first statement in the script — the
-  // Workflow tool rejects the whole script otherwise (#2590). Leading comments
-  // are not statements, but the meta block is emitted first regardless so the
-  // contract holds under the strictest reading of "first statement".
-  //
-  // meta.phases must be a PURE LITERAL (no variables, calls, spreads, or
-  // template interpolation), and its titles are matched EXACTLY against the
-  // phase() calls emitted below.
-  lines.push('export const meta = {');
-  lines.push('  name: ' + quoteString('gsd-execute-' + runId) + ',');
-  lines.push('  description: ' + quoteString('GSD wave dispatch for ' + phaseDir) + ',');
-  lines.push('  phases: [');
-  for (const w of waves) {
-    lines.push('    { title: ' + quoteString('Wave ' + w.id) + ', detail: '
-      + quoteString(w.plans.length + ' plan(s)') + ' },');
-  }
-  lines.push('  ],');
-  lines.push('}');
-  lines.push('');
-  lines.push('// GSD Workflow script — generated by the claude-orchestration capability (#1143)');
-  lines.push('// phase: ' + phaseDir);
-  lines.push('// BETA: preview-grade; on any failure the orchestrator falls back to inline dispatch.');
-  lines.push('// Composes the SAME gsd-executor agent as the inline path, so artifacts (SUMMARY.md)');
-  lines.push('// and commits are produced identically. Worktree isolation is per-plan (use_worktree)');
-  lines.push('// and mirrors execute-phase.md step 2.5\'s submodule gate exactly (#2772 / #2285).');
+  const header: string[] = [
+    'GSD Workflow script — generated by the claude-orchestration capability (#1143)',
+    'phase: ' + phaseDir,
+    'BETA: preview-grade; on any failure the orchestrator falls back to inline dispatch.',
+    'Composes the SAME gsd-executor agent as the inline path, so artifacts (SUMMARY.md)',
+    'and commits are produced identically. Worktree isolation is per-plan (use_worktree)',
+    'and mirrors execute-phase.md step 2.5\'s submodule gate exactly (#2772 / #2285).',
+  ];
   // #2686 / ADR-1411: state which model was applied — or that none resolved —
   // so an opted-in user can SEE the routing decision instead of having to read
   // the emitted options. A fallback must be a visible value, never silent.
@@ -534,130 +867,49 @@ function emitWorkflowScript(input: EmitInput | null | undefined): EmitOk | EmitE
   // SECURITY: this is a `//` comment, and U+2028/U+2029 are ECMAScript
   // LineTerminators that END a single-line comment in every engine — the ES2019
   // change legalized them inside string LITERALS only, so `quoteString` alone is
-  // NOT sufficient here even though it is sufficient in the object literal
-  // above. An unscriptable model id would otherwise close the comment and make
-  // the remainder live top-level code. `emitWorkflowScript` rejects such ids
-  // before reaching this point (see the validation above), which is what makes
-  // interpolating here safe.
+  // NOT sufficient here. An unscriptable model id is rejected above, and
+  // `renderFanOutPlan` refuses any header line carrying a line terminator.
   const provenanceModel = emittableModel(executorModel);
   if (provenanceModel !== undefined) {
-    lines.push('// model: ' + quoteString(provenanceModel) + ' (resolved for gsd-executor, same source as the inline path)');
+    header.push('model: ' + quoteString(provenanceModel) + ' (resolved for gsd-executor, same source as the inline path)');
   } else {
-    lines.push('// model: none applied — resolved to "inherit"/empty, so each agent inherits the');
-    lines.push('// orchestrator model (#2517: emitting an empty model 404s on some runtimes).');
+    header.push('model: none applied — resolved to "inherit"/empty, so each agent inherits the');
+    header.push('orchestrator model (#2517: emitting an empty model 404s on some runtimes).');
   }
-  lines.push('//');
+  header.push('');
   // resumeFromRunId is a Workflow TOOL INPUT parameter, not a script function —
   // calling it threw "resumeFromRunId is not defined" (#2590). The run id is
   // carried in summary.resumeRunId for the caller to pass as that input.
-  lines.push('// resume: pass ' + quoteString(runId) + ' as the Workflow tool\'s resumeFromRunId input');
-  lines.push('// (it is a tool parameter, NOT a script function).');
+  header.push('resume: pass ' + quoteString(runId) + ' as the Workflow tool\'s resumeFromRunId input');
+  header.push('(it is a tool parameter, NOT a script function).');
   if (budgetTokens !== null) {
     // `budget` is a read-only object ({ total, spent(), remaining() }) supplied
     // by the caller's token directive — a script cannot SET it, and `budget(n)`
     // threw "budget is not a function" (#2590). Recorded as intent only.
-    lines.push('// budget: ' + budgetTokens + ' output tokens intended for this run; `budget` is');
-    lines.push('// read-only in a Workflow script — set it via the caller\'s token directive.');
-  }
-  lines.push('');
-
-  // #3302: the generated script must hand the per-agent executor results back
-  // to the orchestrator so it can feed the wave merge chain. Emitted right
-  // after the header comments (meta stays the first statement): a helper that
-  // extracts the executor's <worktree_metadata> JSON (agents/gsd-executor.md
-  // <worktree_metadata_capture>) from one agent() result, plus the outcomes
-  // accumulator the stage barriers below push into. `metadata` is null when
-  // the result carried no parseable block — the LOUD-failure input the
-  // orchestrator halts on for expects_worktree plans (never a silent skip).
-  lines.push('// #3302: extract the executor-returned <worktree_metadata> JSON so the');
-  lines.push('// orchestrator can record it into WAVE_WORKTREE_MANIFEST after the run');
-  lines.push('// (worktree.record-agent -> worktree.cleanup-wave, the same manifest-scoped');
-  lines.push('// merge chain inline dispatch feeds). null = absent/unparseable/interrupted.');
-  lines.push('function gsdWorktreeMetadata(agentResult) {');
-  lines.push('  if (typeof agentResult !== \'string\') return null;');
-  lines.push('  const m = agentResult.match(/<worktree_metadata>([\\s\\S]*?)<\\/worktree_metadata>/);');
-  lines.push('  if (m === null) return null;');
-  lines.push('  try {');
-  lines.push('    const parsed = JSON.parse(m[1]);');
-  lines.push('    return (parsed !== null && typeof parsed === \'object\') ? parsed : null;');
-  lines.push('  } catch (e) {');
-  lines.push('    return null;');
-  lines.push('  }');
-  lines.push('}');
-  lines.push('const gsdAgentOutcomes = [];');
-  lines.push('');
-
-  const stagesByWave: string[][][] = [];
-  let totalPlans = 0;
-  let worktreePlans = 0;
-
-  for (let wi = 0; wi < waves.length; wi++) {
-    const wave = waves[wi];
-    const stages = partitionStages(wave.plans);
-    stagesByWave.push(stages);
-    totalPlans += wave.plans.length;
-    for (const p of wave.plans) {
-      if (p.use_worktree !== false) worktreePlans += 1;
-    }
-
-    lines.push('// Wave ' + wave.id);
-    // Title must match this wave's meta.phases entry EXACTLY.
-    lines.push('phase(' + quoteString('Wave ' + wave.id) + ')');
-    for (let si = 0; si < stages.length; si++) {
-      const stagePlanIds = stages[si];
-      // Resolve back to plan objects for briefs (ids are unique within a wave — validated above).
-      const stagePlans = stagePlanIds.map((id) => wave.plans.find((p) => p.id === id) as Plan);
-      if (stages.length > 1) {
-        lines.push('// Stage ' + si + (si > 0 ? ' (sequential — files_modified overlap)' : ''));
-      }
-      // parallel() takes an ARRAY OF THUNKS — `parallel(agent(…), agent(…))`
-      // threw "parallel() expects an array of functions" (#2590). Passing
-      // agent() results directly would also start every agent eagerly, before
-      // parallel() could bound concurrency.
-      // #3302: capture the barrier's resolved results (one per thunk, in thunk
-      // order — the documented parallel() contract) so each plan's outcome can
-      // be tagged and returned below. Discarding them stranded every
-      // worktree-wf_* branch: the merge chain had no input (#3302).
-      lines.push('const gsdStage_' + wi + '_' + si + ' = await parallel([');
-      for (const p of stagePlans) {
-        lines.push('  () => agent(' + quoteString(p.brief) + ', ' + agentOptions(p, executorModel) + '),');
-      }
-      lines.push('])');
-      // Positional tagging is decided at EMIT time from the validated manifest,
-      // so attribution survives out-of-order completion and needs no runtime
-      // introspection. expects_worktree mirrors agentOptions' own per-plan
-      // decision (use_worktree !== false).
-      lines.push('gsdAgentOutcomes.push(');
-      for (let pi = 0; pi < stagePlans.length; pi++) {
-        const p = stagePlans[pi];
-        const tail = pi < stagePlans.length - 1 ? ',' : '';
-        lines.push('  { plan: ' + quoteString(p.id) + ', expects_worktree: ' + (p.use_worktree !== false) + ', metadata: gsdWorktreeMetadata(gsdStage_' + wi + '_' + si + '[' + pi + ']) }' + tail);
-      }
-      lines.push(')');
-    }
-    if (wi < waves.length - 1) lines.push('');
+    header.push('budget: ' + budgetTokens + ' output tokens intended for this run; `budget` is');
+    header.push('read-only in a Workflow script — set it via the caller\'s token directive.');
   }
 
-  // #3302: the script's top-level return value is what the Workflow tool hands
-  // back to the orchestrator. One { plan, expects_worktree, metadata } entry
-  // per dispatched plan; the orchestrator records every worktree entry via
-  // `gsd_run query worktree.record-agent` and HALTS on a null metadata entry
-  // for an expects_worktree plan (see the execute:wave:pre fragment) — a
-  // silently-empty manifest is the exact #3302 failure mode.
-  lines.push('return gsdAgentOutcomes');
-
-  const script = lines.join('\n');
+  // ADR-5273 Decision 1: waves go through the adapter and the one renderer.
+  const adapted = wavesToFanOutPlan(waves, executorModel);
+  const rendered = renderFanOutPlan(adapted.plan, {
+    name: 'gsd-execute-' + runId,
+    description: 'GSD wave dispatch for ' + phaseDir,
+    header,
+    phases: adapted.phases,
+  });
+  if (!rendered.ok) return { ok: false, reason: rendered.reason };
 
   return {
     ok: true,
-    script,
+    script: rendered.script,
     summary: {
       waves: waves.length,
-      plans: totalPlans,
+      plans: adapted.plans,
       // #3302: the number of record-agent entries the orchestrator must end up
       // with in WAVE_WORKTREE_MANIFEST after the run — the loud count check.
-      worktreePlans,
-      stagesByWave,
+      worktreePlans: adapted.worktreePlans,
+      stagesByWave: adapted.stagesByWave,
       resumeRunId: runId,
       budgetTokens,
     },
@@ -759,6 +1011,9 @@ function resolveWaveDispatch(input: ResolveWaveDispatchInput | null | undefined)
 export = {
   detectWorkflowBackend,
   emitWorkflowScript,
+  renderFanOutPlan,
+  renderFanOutStage,
+  wavesToFanOutPlan,
   resolveWaveDispatch,
   compareSemver,
   isValidSemver,

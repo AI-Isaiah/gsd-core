@@ -716,7 +716,8 @@ const capabilities = {
         "subcommands": [
           "detect-backend",
           "emit-workflow",
-          "resolve-wave-dispatch"
+          "resolve-wave-dispatch",
+          "render-fan-out"
         ]
       }
     ],

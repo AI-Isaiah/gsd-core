@@ -69,6 +69,14 @@ names the reason (`disabled`, `role_not_selected`, `no_concurrency`, `no_worker_
 - `<phase dir>/<NN>-SWARM-ANSWERS-<role>.json`, the raw worker answers exactly as they came back,
   for audit. Both files are committed when `commit_docs` is on.
 
+## The Workflow tool
+
+Swarm dispatches from the main loop with ordinary `Agent()` calls, so the Workflow tool's
+`workflowSizeGuideline` (by default fewer than 10 agents per script) does not limit it. With
+claude-orchestration enabled, `gsd-tools claude-orchestration render-fan-out` shows a stage as a
+Workflow script; no workflow runs that script until #4747 item E picks a route. If you run one
+yourself, raise `workflowSizeGuideline` to fit the stage.
+
 ## When it falls back
 
 A role runs its single agent, loudly, when more than 25 % of worker answers had to be dropped
