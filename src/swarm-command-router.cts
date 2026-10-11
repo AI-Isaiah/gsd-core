@@ -192,11 +192,24 @@ function handlePlan(opts: RouteSwarmCommandOptions): unknown {
   // Live-run lesson (2026-10-11): review workers read only around the change when the step has a
   // diff base. A failed diff leaves changedLines undefined, so the units are reviewed whole.
   let changedLines: Record<string, string[]> | undefined;
+  let lineCounts: Record<string, number> | undefined;
+  let boundaries: Record<string, number[]> | undefined;
   const diffBase = flagValue(args, '--diff-base');
   if (files !== undefined) {
     if (diffBase) {
       if (!DIFF_BASE_RE.test(diffBase)) return makeInvalidArgs('diff-base', `--diff-base must be a git revision. ${usage}`, ERROR_REASON.USAGE);
       changedLines = diffRanges(cwd, diffBase, files);
+      // Each file's length (for its read window) and its blank lines (where a long change is cut).
+      lineCounts = {};
+      boundaries = {};
+      for (const f of files) {
+        const r = readBoundedFile(path.resolve(cwd, f));
+        if (!r.ok) continue;
+        const lines = r.text.split('\n');
+        if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+        lineCounts[f] = lines.length;
+        boundaries[f] = lines.flatMap((l, i) => (l.trim() === '' ? [i + 1] : []));
+      }
     }
   }
 
@@ -210,7 +223,7 @@ function handlePlan(opts: RouteSwarmCommandOptions): unknown {
     }
   }
 
-  output(buildSwarmPlan({ stage, role, stepAgent: agent, phase, config: cfg.config, worker, step, units, files, projectRoot: cwd, phaseInputs, changedLines }), raw);
+  output(buildSwarmPlan({ stage, role, stepAgent: agent, phase, config: cfg.config, worker, step, units, files, projectRoot: cwd, phaseInputs, changedLines, lineCounts, boundaries }), raw);
   return undefined;
 }
 

@@ -27,7 +27,7 @@ the codebase, in parallel, and the step's own agent synthesizes their answers in
 gsd-tools config-set swarm.enabled true
 ```
 
-That is enough: all three roles fan out, up to 50 workers per role run, up to 20 at a time. Code review gives each worker at most about 60 changed lines when the review has a diff base, so a large change spreads over many workers.
+That is enough: all three roles fan out, up to 50 workers per role run, up to 20 at a time. Code review gives each worker at most about 60 changed lines to review when the review has a diff base, so a large change spreads over many workers. Each worker still reads the whole file (up to 600 lines) or 100 lines around its part, so it sees the setup and declarations its lines depend on.
 
 ## Step 2 — Size the swarm (optional)
 

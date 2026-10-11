@@ -24,6 +24,10 @@ const {
   parseScopeFile,
   parseDiffRanges,
   splitRanges,
+  readWindow,
+  REVIEW_READ_WHOLE_LINES,
+  REVIEW_READ_CONTEXT,
+  REVIEW_SNAP_LINES,
   reviewUnits,
   groupUnits,
   REVIEW_UNIT_LINES,
@@ -179,6 +183,26 @@ describe('diff-scoped review units, split to about 60 changed lines (live-run le
     assert.deepEqual(splitRanges(['5'], 1), [['5']]);
   });
 
+  test('a long change is cut on the nearest boundary line within REVIEW_SNAP_LINES, never on an empty chunk', () => {
+    assert.equal(REVIEW_SNAP_LINES, 20);
+    const blank = new Set([50, 114]);
+    assert.deepEqual(splitRanges(['1-130'], 60, (l) => blank.has(l)), [['1-50'], ['51-110'], ['111-130']]);
+    assert.deepEqual(splitRanges(['1-130'], 60, (l) => l === 30), [['1-60'], ['61-120'], ['121-130']], 'a boundary 30 back is out of reach');
+    assert.deepEqual(splitRanges(['1-130'], 60, (l) => l === 60), [['1-60'], ['61-120'], ['121-130']], 'a boundary on the cut keeps it');
+    assert.deepEqual(splitRanges(['1-3'], 1, () => true), [['1'], ['2'], ['3']]);
+    const units = reviewUnits(['f'], { f: ['1-130'] }, { f: [50, 114] });
+    assert.deepEqual(units.map((u) => u.ranges), [['1-50'], ['51-110'], ['111-130']]);
+  });
+
+  test('readWindow: a short file is read whole; a long one around the reviewed lines', () => {
+    assert.deepEqual([REVIEW_READ_WHOLE_LINES, REVIEW_READ_CONTEXT], [600, 100]);
+    assert.equal(readWindow(['115-174'], 417), '1-417', 'the 2026-10-11 miss: setup at 106, check at 165, both read');
+    assert.equal(readWindow(['4918', '5033-5040'], 7109), '4818-5140');
+    assert.equal(readWindow(['20'], 700), '1-120');
+    assert.equal(readWindow(['690'], 700), '590-700');
+    assert.equal(readWindow(['20'], null), '1-120');
+  });
+
   test('reviewUnits never bundles files: one unit per file, more for a large change, whole file without ranges', () => {
     const units = reviewUnits(['a', 'b', 'c'], { a: ['1-130'], b: ['7'] });
     assert.deepEqual(units, [
@@ -198,13 +222,13 @@ describe('diff-scoped review units, split to about 60 changed lines (live-run le
 
   test('a diff-scoped plan gives each worker its own ranges; one large file alone fans out', () => {
     const changedLines = { [file(0)]: ['1-100'], [file(1)]: ['3'] };
-    const p = plan({ files: [file(0), file(1), file(2)], changedLines });
+    const p = plan({ files: [file(0), file(1), file(2)], changedLines, lineCounts: { [file(0)]: 100, [file(1)]: 50 } });
     const ws = p.stages[0].dispatches.filter((d) => d.purpose === 'worker');
     assert.deepEqual(ws.map((d) => d.scope), [[file(0)], [file(0)], [file(1)], [file(2)]]);
-    assert.match(ws[0].prompt, /<changed_lines>\nsrc\/f000.ts: 1-60\n<\/changed_lines>/);
-    assert.match(ws[1].prompt, /<changed_lines>\nsrc\/f000.ts: 61-100\n<\/changed_lines>/);
+    assert.match(ws[0].prompt, /<changed_lines>\nsrc\/f000.ts: review 1-60; read 1-100\n<\/changed_lines>/);
+    assert.match(ws[1].prompt, /<changed_lines>\nsrc\/f000.ts: review 61-100; read 1-100\n<\/changed_lines>/);
     assert.match(ws[3].prompt, /src\/f002.ts: whole file/);
-    assert.match(ws[0].prompt, /Read each file around those ranges/);
+    assert.match(ws[0].prompt, /read all of the read lines with Read offset and limit before judging anything/);
     assert.equal(coreVerdict(p, 'fan-out', 'gsd-code-reviewer'), 'ok');
     const one = plan({ files: [file(0)], changedLines: { [file(0)]: ['1-100'] } });
     assert.equal(one.mode, 'fan-out', 'a 100-line change in one file is two units');
@@ -218,7 +242,7 @@ describe('diff-scoped review units, split to about 60 changed lines (live-run le
     const p = plan({ files: [file(0), file(1)], changedLines, config: config({ maxWorkers: 2 }) });
     const ws = p.stages[0].dispatches.filter((d) => d.purpose === 'worker');
     assert.deepEqual(ws.map((d) => d.scope), [[file(0)], [file(1)]], 'three units in two workers: both halves of f000 share one');
-    assert.match(ws[0].prompt, /src\/f000.ts: 1-60, 61-100/);
+    assert.match(ws[0].prompt, /src\/f000.ts: review 1-60, 61-100; read 1-/);
   });
 });
 
