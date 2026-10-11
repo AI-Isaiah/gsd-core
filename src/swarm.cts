@@ -394,6 +394,10 @@ export function buildSwarmPlan(input: PlanInput): FanOutPlan | Single {
 export interface RawAnswer {
   purpose: 'worker' | 'cross-file';
   text: string;
+  /** Set once the answer has had its one repair dispatch; a repaired answer is never offered again. */
+  repaired?: boolean;
+  /** The rejected first answer, kept for audit when the executor replaces `text` with the repair. */
+  firstText?: string;
 }
 
 export interface AnswerCheck {
@@ -483,6 +487,60 @@ export function checkAnswers(
     droppedShare,
     block: `<swarm_worker_answers>\n${json}\n</swarm_worker_answers>`,
   };
+}
+
+// ─── Repair round (ADR-5273 Decision 9) ─────────────────────────────────────
+
+/**
+ * At most this many repair dispatches per role run: a quarter of `max_workers`, rounded up. With
+ * the drop line at 25 %, a run whose drops all repair stays a swarm; one that needs more repairs
+ * than this was too broken to rescue and falls back.
+ */
+export function repairCap(maxWorkers: number): number {
+  return Math.ceil(maxWorkers * MAX_DROPPED_SHARE);
+}
+
+/** What the worker is told about its rejected answer. Never echoes the answer itself. */
+export function repairNote(reason: string, text: unknown): string {
+  const lines = ['<repair>', 'Your previous answer to this task was rejected and discarded. Answer the same task again.'];
+  if (reason === 'answer_too_large') {
+    const bytes = typeof text === 'string' ? Buffer.byteLength(text, 'utf8') : 0;
+    lines.push(`It was ${bytes} bytes; the limit is ${ANSWER_MAX_BYTES}. Keep only the most severe findings and shorten every field, so the whole answer fits with room to spare.`);
+  } else if (reason === 'not_json' || reason === 'not_object') {
+    lines.push('It was not one valid JSON object. Return exactly one JSON object and nothing else: no prose, no code fence, and check that every bracket closes.');
+  } else if (reason === 'schema_lines') {
+    lines.push('A "lines" value broke the grammar. Use "42", "42-45", or several ranges separated by commas, such as "74-75, 170".');
+  } else if (reason.startsWith('schema_')) {
+    lines.push(`It did not match <schema> (${reason.slice('schema_'.length).replace(/_/g, ' ')}). Check every required field and its type against <schema>.`);
+  } else {
+    lines.push(`Reason: ${reason}.`);
+  }
+  lines.push('</repair>');
+  return lines.join('\n');
+}
+
+export interface RepairDispatch extends FanOutDispatch {
+  /** The answer's index in the answers file, and the dispatch's index in the worker stage. */
+  index: number;
+  reason: string;
+}
+
+/**
+ * One repair dispatch per dropped answer that has not been repaired yet, in index order, up to
+ * `repairCap(maxWorkers)`. Each is the original worker dispatch with the rejection reason
+ * appended to its prompt, so the worker learns what went wrong instead of being discarded.
+ */
+export function buildRepairs(
+  items: readonly RawAnswer[],
+  dropped: ReadonlyArray<{ index: number; reason: string }>,
+  dispatches: readonly FanOutDispatch[],
+  maxWorkers: number,
+): RepairDispatch[] {
+  const eligible = dropped.filter((d) => items[d.index] !== undefined && items[d.index].repaired !== true && dispatches[d.index] !== undefined);
+  return eligible.slice(0, repairCap(maxWorkers)).map((d) => {
+    const src = dispatches[d.index];
+    return { ...src, prompt: `${src.prompt}\n${repairNote(d.reason, items[d.index].text)}`, index: d.index, reason: d.reason };
+  });
 }
 
 // ─── Telemetry (ADR-5273 Decision 5) ────────────────────────────────────────

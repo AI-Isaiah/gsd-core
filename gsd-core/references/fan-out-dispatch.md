@@ -87,7 +87,7 @@ the reserved fallback on the single agent. Its output overwrites anything the fa
 run-time rungs are:
 
 - `no_agent_tool`: the first worker reports the agent tool unavailable (#853);
-- `too_many_dropped_answers`: more than 25 % of worker answers were dropped;
+- `too_many_dropped_answers`: more than 25 % of worker answers were still dropped after the repair round;
 - `synthesis_failed`: the synthesizer wrote no artefact;
 - `anchor_check_failed`: the strategy's anchor check could not prune an unverified claim cleanly.
 
@@ -128,8 +128,15 @@ post-steps below are its commands (`gsd_run swarm …`). `<role>` is the swarm r
    `{ "purpose": "worker" | "cross-file", "text": "<the returned text, unedited>" }` to
    `${PHASE_DIR}/${PADDED_PHASE}-SWARM-ANSWERS-<role>.json`. The file stays in the phase
    directory for audit and for the fixture captures. Then run
-   `gsd_run swarm check-answers --agent <agent> --answers <that file>`. A verdict of
-   `too_many_dropped_answers` is a run-time miss.
+   `gsd_run swarm check-answers --agent <agent> --answers <that file> --plan <the verdict file>`.
+   **Repair round.** When its `repairs` list is not empty, dispatch each entry once, as in step 4
+   (same `agentType`, `model`, `tier`; the `prompt` already names what was wrong with the first
+   answer). Write each result into the answers file at the entry's `index`: move the old text to
+   `firstText`, put the new text in `text`, and set `"repaired": true`. Then run `check-answers`
+   once more, without `--plan`: there is one repair round per role run, never a second. The
+   verdict of that last call decides: `too_many_dropped_answers` is a run-time miss. At most
+   ⌈`max_workers` / 4⌉ answers are repaired, so a run spends at most that many agents beyond
+   `max_workers` + 3.
 6. **Synthesize.** Build the synthesizer prompt as the site's own filled prompt, the one the
    single-agent spawn would send, followed by the plan's `synthesizer` prompt with the token
    `<swarm_worker_answers_slot/>` replaced by the `block` field that `check-answers` printed,

@@ -79,6 +79,7 @@ yourself, raise `workflowSizeGuideline` to fit the stage.
 
 ## When it falls back
 
-A role runs its single agent, loudly, when more than 25 % of worker answers had to be dropped
-(over 4 KiB, not JSON, or off-schema), when the synthesizer wrote nothing, or when an unverified
+A worker answer that is over 4 KiB, not JSON, or off-schema first gets one repair dispatch that
+tells the worker what was wrong (at most a quarter of `max_workers` per run). A role runs its
+single agent, loudly, when more than 25 % of worker answers are still dropped after that, when the synthesizer wrote nothing, or when an unverified
 claim could not be removed cleanly. The fallback's artefact replaces the swarm's.

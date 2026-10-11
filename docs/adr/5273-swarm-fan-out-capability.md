@@ -64,7 +64,7 @@ The `fanOutStrategy` seam is also a candidate answer to #4747 E1 for capability-
 - **Concurrency.** *C* = min(`dispatch-capacity`, `swarm.max_concurrency`, `swarm.max_workers`). Each term has one owner: the host's ceiling (`dispatch-capacity`, the seam #3777 gates on, 20 on `claude`), swarm's own parallelism (`swarm.max_concurrency`, default `20`), and swarm's fan-out width (`swarm.max_workers`). The third term only matters when `max_concurrency` is set above `max_workers`. Workers run in waves of at most *C* per message, so 50 workers at *C* = 20 take three waves.
   - **Swarm does not read `parallelization.max_concurrent_agents`.** An earlier revision made swarm its first reader. That was reversed: the key defaults to `3`, the template writes `3` into every existing `config.json`, and a swarm throttled to three at a time is not a swarm. The key stays unread, as before this ADR. Giving it a reader is execute-phase's business and out of scope here.
   - **Core never reads a swarm-owned key.** The strategy reads `swarm.max_workers` and `swarm.max_concurrency`, validates them, and writes them into the plan as `maxWorkers` and `maxConcurrency`. Core validates the plan's values and computes *C* from them. An invalid config value is the strategy's to report, with its own reason code.
-- **Agent budget.** There is no fixed agent ceiling. One role run dispatches at most `max_workers` + 3 agents, and every dispatch counts, including the single-agent fallback rerun:
+- **Agent budget.** There is no fixed agent ceiling. One role run dispatches at most `max_workers` + 3 agents at plan time, and every dispatch counts, including the single-agent fallback rerun. The repair round (Decision 9) adds at most ⌈`max_workers` / 4⌉ at run time:
 
   | Role | Decomposition | Workers | Cross-file worker | Synthesizer | Reserved fallback | Maximum |
   |---|---|---|---|---|---|---|
@@ -131,7 +131,7 @@ The ladder runs fail-closed, in the style of `detectWorkflowBackend`, in two pha
 |---|---|---|
 | first worker `Agent()` does not return tool-unavailable (the #853 case, a real error and not self-assessed) | `no_agent_tool` | Yes |
 | the synthesizer wrote the artefact | `synthesis_failed` | Yes |
-| at most 25 % of worker answers were dropped (Decision 9: over 4 KiB, not JSON, or failing its schema) | `too_many_dropped_answers` | Yes |
+| at most 25 % of worker answers were dropped after the repair round (Decision 9: over 4 KiB, not JSON, or failing its schema) | `too_many_dropped_answers` | Yes |
 | `verify-anchors --prune` resolves or cleanly prunes every anchor | `anchor_check_failed` | Yes |
 
 "Loud" means a banner, `◆ Swarm skipped for <role>: <reason> — running single-agent <agent>`, plus a `mode: "single"` telemetry entry. Today only `claude` passes the concurrency rung. Because the ladder reads descriptor and catalog data, a runtime needs no swarm manifest change to join: it passes once its descriptor declares `maxConcurrency` and a Haiku-class tier maps to a model for it, from the catalog, `model_policy.runtime_tiers` or `model_overrides`.
@@ -206,6 +206,8 @@ Swarm reads paths written by models and passes model output to an agent that hol
   - the plan carries an executor-only field (Decision 1).
 - **Reviewer-lane evidence stays where it is.** Both code-review steps already carry `supportsReviewerLanes`. Lane dispatch is unchanged by swarm. Lane evidence goes only to the synthesizer, `gsd-code-reviewer`, in its existing `<external_reviewer_evidence>` block. It never reaches a per-file worker or the cross-file worker, so it is never laundered through a worker answer past the consolidation contract.
 
+
+- **Repair, not just drop** (founder decision 2026-10-11, after a live run). The first live review (Quantalyze PR #995, 19 files) dropped 8 of 20 worker answers, 40 %, so the run fell back. None of the drops was a wrong claim: five answers were 4.2-6.8 KiB because the prompt named the cap but no budget, two cited one finding across non-adjacent lines (`"74-75,170"`), which the `lines` grammar refused, and one listed findings but omitted the redundant `not_found`. The fixes are in two layers. **Prevention:** review prompts carry a budget (at most 5 findings, most severe first, bounded field lengths), the schema carries `maxItems` and the `lines` pattern, `lines` accepts comma-separated ranges, and a review answer with findings may omit `not_found`. **Repair:** a dropped answer gets exactly one more dispatch, the original prompt plus a `<repair>` note naming the fault (its byte count, the broken field), never the rejected text. Repairs are capped at ⌈`max_workers` / 4⌉ per role run and run once; the 25 % line is judged after them. Replayed against the live run, the prevention alone took the drops from 8 to 5, and the eight reruns with the new prompt came back at 1.7-3.2 KiB with all 20 answers passing.
 ## Alternatives considered
 
 - **Swarm as a mode of claude-orchestration** (`claude_orchestration.swarm.*`). Rejected; see Decision 1.

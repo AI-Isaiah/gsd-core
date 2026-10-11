@@ -38,6 +38,7 @@ import {
   buildSwarmPlan,
   checkAnswers,
   buildTelemetryEntry,
+  buildRepairs,
 } from './swarm.cjs';
 import type { Unit, RawAnswer } from './swarm.cjs';
 import { FAN_OUT_WORKER_AGENT, checkWorkerAnswer } from './fan-out-plan.cjs';
@@ -46,7 +47,7 @@ import { kindForArtefact, pruneArtefact, verifyAnchors } from './swarm-anchors.c
 import type { ArtefactKind } from './swarm-anchors.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseLocatorMod = require('./phase-locator.cjs');
-import type { ResolvedModel } from './fan-out-plan.cjs';
+import type { ResolvedModel, FanOutDispatch } from './fan-out-plan.cjs';
 
 const { output, ERROR_REASON } = io;
 const { makeInvalidArgs } = commandRoutingHub;
@@ -201,13 +202,15 @@ function handlePlan(opts: RouteSwarmCommandOptions): unknown {
 }
 
 /**
- * `swarm check-answers --agent <agent> --answers <file>`: the file is a JSON array of
- * `{ purpose: "worker" | "cross-file", text }`, one per worker dispatch, in plan order. Prints the
- * verdict, the drop list and the `<swarm_worker_answers>` block for the synthesizer.
+ * `swarm check-answers --agent <agent> --answers <file> [--plan <verdict>]`: the file is a JSON
+ * array of `{ purpose: "worker" | "cross-file", text, repaired? }`, one per worker dispatch, in
+ * plan order. Prints the verdict, the drop list and the `<swarm_worker_answers>` block for the
+ * synthesizer. With `--plan` (the `loop fan-out-plan` verdict), it also prints `repairs`: one
+ * dispatch per dropped answer not yet repaired, carrying the rejection reason, up to `repairCap`.
  */
 function handleCheckAnswers(opts: RouteSwarmCommandOptions): unknown {
   const { args, cwd, raw } = opts;
-  const usage = 'Usage: gsd-tools swarm check-answers --agent <agent> --answers <file>';
+  const usage = 'Usage: gsd-tools swarm check-answers --agent <agent> --answers <file> [--plan <verdict file>]';
   const agent = flagValue(args, '--agent');
   const answersArg = flagValue(args, '--answers');
   if (!agent) return makeInvalidArgs('agent', usage, ERROR_REASON.USAGE);
@@ -218,7 +221,32 @@ function handleCheckAnswers(opts: RouteSwarmCommandOptions): unknown {
   if (!file.ok) return makeInvalidArgs('answers', file.detail, ERROR_REASON.USAGE);
   const parsed = safeJsonParse(file.text, { maxLength: INPUT_MAX_BYTES, label: '--answers' });
   if (!parsed.ok || !Array.isArray(parsed.value)) return makeInvalidArgs('answers', '--answers must hold a JSON array of { purpose, text }', ERROR_REASON.USAGE);
-  output(checkAnswers(role, parsed.value as RawAnswer[], checkWorkerAnswer), raw);
+  const items = parsed.value as RawAnswer[];
+  const check = checkAnswers(role, items, checkWorkerAnswer);
+  const planArg = flagValue(args, '--plan');
+  if (planArg === undefined) {
+    output(check, raw);
+    return undefined;
+  }
+  if (!planArg) return makeInvalidArgs('plan', usage, ERROR_REASON.USAGE);
+  const planFile = readBoundedFile(path.resolve(cwd, planArg));
+  if (!planFile.ok) return makeInvalidArgs('plan', planFile.detail, ERROR_REASON.USAGE);
+  const verdict = safeJsonParse(planFile.text, { maxLength: INPUT_MAX_BYTES, label: '--plan' });
+  const plan = verdict.ok && verdict.value !== null && typeof verdict.value === 'object'
+    ? ((verdict.value as Record<string, unknown>)['plan'] ?? verdict.value) as { maxWorkers?: unknown; stages?: unknown }
+    : null;
+  const stage = plan !== null && Array.isArray(plan.stages)
+    ? (plan.stages as Array<{ dispatches?: unknown }>).find((st) => Array.isArray(st.dispatches)
+      && (st.dispatches as Array<{ purpose?: unknown }>).some((d) => d.purpose === 'worker'))
+    : undefined;
+  if (plan === null || stage === undefined || typeof plan.maxWorkers !== 'number') {
+    return makeInvalidArgs('plan', '--plan must hold a fan-out verdict or plan with a worker stage', ERROR_REASON.USAGE);
+  }
+  const dispatches = stage.dispatches as FanOutDispatch[];
+  if (dispatches.length !== items.length) {
+    return makeInvalidArgs('plan', `--answers holds ${items.length} answers but the worker stage has ${dispatches.length} dispatches`, ERROR_REASON.USAGE);
+  }
+  output({ ...check, repairs: buildRepairs(items, check.dropped, dispatches, plan.maxWorkers) }, raw);
   return undefined;
 }
 
