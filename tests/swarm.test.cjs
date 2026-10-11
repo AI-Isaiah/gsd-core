@@ -22,6 +22,11 @@ const {
   workerTierUsable,
   groupReviewFiles,
   parseScopeFile,
+  parseDiffRanges,
+  rangeLineCount,
+  packReviewUnits,
+  REVIEW_UNIT_LINES,
+  REVIEW_UNIT_FILES,
   readUnits,
   buildSwarmPlan,
   checkAnswers,
@@ -139,6 +144,61 @@ describe('groupReviewFiles', () => {
         && groups.length === Math.min(n, mw)
         && (sizes.length === 0 || Math.max(...sizes) - Math.min(...sizes) <= 1);
     }));
+  });
+});
+
+describe('diff-scoped, packed review units (live-run lessons 2026-10-11)', () => {
+  const diff = [
+    'diff --git a/src/a.ts b/src/a.ts',
+    '--- a/src/a.ts',
+    '+++ b/src/a.ts',
+    '@@ -10,0 +11,3 @@ fn',
+    '+x',
+    '@@ -40 +44 @@',
+    '@@ -50,2 +54,0 @@',
+    'diff --git a/src/gone.ts b/src/gone.ts',
+    '--- a/src/gone.ts',
+    '+++ /dev/null',
+    '@@ -1,9 +0,0 @@',
+    'diff --git a/src/b c.ts b/src/b c.ts',
+    '+++ b/src/b c.ts',
+    '@@ -0,0 +1,120 @@',
+  ].join('\n');
+
+  test('parseDiffRanges reads new-side hunks; a pure deletion marks its line; a deleted file is not listed', () => {
+    assert.deepEqual(Object.fromEntries(parseDiffRanges(diff)), { 'src/a.ts': ['11-13', '44', '54'], 'src/b c.ts': ['1-120'] });
+    assert.deepEqual([rangeLineCount(['11-13', '44', '54']), rangeLineCount(['1-120'])], [5, 120]);
+    assert.deepEqual(Object.fromEntries(parseDiffRanges('')), {});
+  });
+
+  test('packing fills units up to the line budget and the file cap, in order', () => {
+    const files = Array.from({ length: 12 }, (_, i) => `f${i}`);
+    const units = packReviewUnits(files, () => 20, 20);
+    assert.deepEqual(units.map((u) => u.length), [5, 5, 2], 'the file cap closes a unit before the line budget');
+    assert.deepEqual(packReviewUnits(['big', 'a', 'b', 'c'], (f) => (f === 'big' ? 400 : 60), 20), [['big'], ['a', 'b'], ['c']]);
+    assert.deepEqual(units.flat(), files, 'every file once, in order');
+    assert.equal(REVIEW_UNIT_LINES, 150);
+    assert.equal(REVIEW_UNIT_FILES, 5);
+  });
+
+  test('packing never drops below two units for two or more files, nor above max_workers', () => {
+    assert.deepEqual(packReviewUnits(['a', 'b', 'c'], () => 1, 20).length, 2);
+    const many = Array.from({ length: 30 }, (_, i) => `f${i}`);
+    assert.equal(packReviewUnits(many, () => 400, 20).length, 20);
+  });
+
+  test('a diff-scoped plan lists each unit\'s changed lines and tells the worker to read around them', () => {
+    const changedLines = { [file(0)]: ['3-5'], [file(1)]: ['1'] };
+    const p = plan({ files: [file(0), file(1), file(2)], changedLines, lineCounts: { [file(0)]: 400, [file(1)]: 400, [file(2)]: 400 } });
+    const ws = p.stages[0].dispatches;
+    assert.deepEqual(ws.filter((d) => d.purpose === 'worker').map((d) => d.scope), [[file(0), file(1)], [file(2)]], '4 changed lines share a unit; a 400-line file with no ranges stands alone');
+    assert.match(ws[0].prompt, /<changed_lines>\nsrc\/f000.ts: 3-5\nsrc\/f001.ts: 1\n<\/changed_lines>/);
+    assert.match(ws[0].prompt, /Read each file around those ranges/);
+    const whole = ws.find((d) => d.scope.includes(file(2)));
+    assert.match(whole.prompt, /src\/f002.ts: whole file/);
+    assert.equal(coreVerdict(p, 'fan-out', 'gsd-code-reviewer'), 'ok');
+    const noDiff = plan({ files: [file(0), file(1)] });
+    assert.ok(!noDiff.stages[0].dispatches[0].prompt.includes('<changed_lines>'), 'no diff base, no block, no focus');
   });
 });
 
@@ -444,7 +504,9 @@ describe('CLI: loop fan-out-plan through the swarm strategy', () => {
   before(() => {
     tmp = createTempProject('gsd-swarm-cli-');
     fs.mkdirSync(path.join(tmp, 'src'));
-    for (let i = 0; i < 3; i++) fs.writeFileSync(path.join(tmp, 'src', `f${i}.ts`), `export const v${i} = ${i};\n`);
+    // 160 lines each: past REVIEW_UNIT_LINES, so every file is its own review unit.
+    for (let i = 0; i < 3; i++) fs.writeFileSync(path.join(tmp, 'src', `f${i}.ts`), `export const v${i} = ${i};\n`.repeat(160));
+    for (let i = 0; i < 6; i++) fs.writeFileSync(path.join(tmp, 'src', `tiny${i}.ts`), `export const t${i} = ${i};\n`);
     fs.writeFileSync(path.join(tmp, 'files.txt'), 'src/f0.ts\nsrc/f1.ts\nsrc/f2.ts\nsrc/gone.ts\n');
   });
   after(() => cleanup(tmp));
@@ -467,6 +529,18 @@ describe('CLI: loop fan-out-plan through the swarm strategy', () => {
       assert.equal(d.schema.properties.findings.maxItems, 5);
       assert.ok(d.schema.properties.findings.items.properties.lines.pattern, 'the lines grammar travels in the schema');
     }
+  });
+
+  test('tiny files share a unit, and --diff-base is forwarded through core (an unknown base reviews whole files)', () => {
+    setConfig({ swarm: { enabled: true } });
+    fs.writeFileSync(path.join(tmp, 'tiny.txt'), [0, 1, 2, 3, 4, 5].map((i) => `src/tiny${i}.ts`).join('\n') + '\n');
+    const r = run(['--cap-id', 'code-review', '--point', 'execute:post', '--agent', 'gsd-code-reviewer', '--phase', '1', '--scope-file', 'tiny.txt']);
+    assert.deepEqual(r.plan.stages[0].dispatches.filter((d) => d.purpose === 'worker').map((d) => d.scope.length), [5, 1]);
+    const d = run(['--cap-id', 'code-review', '--point', 'execute:post', '--agent', 'gsd-code-reviewer', '--phase', '1', '--scope-file', 'files.txt', '--diff-base', 'no-such-ref']);
+    assert.equal(d.mode, 'fan-out');
+    assert.ok(!d.plan.stages[0].dispatches[0].prompt.includes('<changed_lines>'), 'git could not answer: whole files');
+    const bad = runGsdTools(['loop', 'fan-out-plan', '--cap-id', 'code-review', '--point', 'execute:post', '--agent', 'gsd-code-reviewer', '--phase', '1', '--scope-file', 'files.txt', '--diff-base', '-rf'], tmp, env());
+    assert.equal(bad.success, false);
   });
 
   test('swarm.max_concurrency throttles C', () => {

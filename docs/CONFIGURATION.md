@@ -1200,7 +1200,7 @@ Owned by the default-off, BETA `swarm` capability (#5273, [ADR-5273](adr/5273-sw
 | `swarm.max_workers` | number | `20` | Most worker units per role run. Integer, at least `2`, **no upper bound**. A run dispatches at most `max_workers + 3` agents, and the synthesizer reads at most `max_workers` × 4 KiB of answers, so a very large value can exceed the synthesizer's context; that run then falls back to single-agent. |
 | `swarm.max_concurrency` | number | `20` | Most workers per wave. Integer, at least `1`. Effective concurrency is min(`dispatch-capacity`, `swarm.max_concurrency`, `swarm.max_workers`); below `2` the role runs single-agent with reason `no_concurrency`. `parallelization.max_concurrent_agents` plays no part. |
 
-The worker model is the catalog row `gsd-swarm-worker` (`haiku` in every profile). Change it with `model_overrides.gsd-swarm-worker`, for example to pin a specific Haiku release.
+The worker model is the catalog row `gsd-swarm-worker` (`haiku` in every profile, and also under `model_profile: inherit`, through the row's `inheritTier`: a swarm on the session's top model is not a swarm). Change it with `model_overrides.gsd-swarm-worker`, for example to pin a specific Haiku release.
 ---
 
 ## Capability Overlay (installed third-party capabilities)

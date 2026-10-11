@@ -45,6 +45,11 @@ export interface AgentMeta {
   budget: string;
   phaseType: string;
   routingTier: string;
+  /**
+   * The tier this agent resolves to under `model_profile: inherit`, instead of the session model.
+   * Only for an agent whose design needs a cheap tier wherever it runs (ADR-5273: the swarm worker).
+   */
+  inheritTier?: string;
 }
 
 /** The shape of model-catalog.json. */
@@ -113,6 +118,13 @@ export const MODEL_PROFILES: Record<string, AgentModelProfiles> = Object.fromEnt
 
 export const AGENT_TO_PHASE_TYPE: Record<string, string> = Object.fromEntries(
   Object.entries(_catalog.agents).map(([agent, meta]) => [agent, meta.phaseType])
+);
+
+/** Agents pinned to a tier even under `model_profile: inherit` (catalog `inheritTier`). */
+export const AGENT_INHERIT_TIERS: Record<string, string> = Object.fromEntries(
+  Object.entries(_catalog.agents)
+    .filter(([, meta]) => typeof meta.inheritTier === 'string' && meta.inheritTier.length > 0)
+    .map(([agent, meta]) => [agent, meta.inheritTier as string])
 );
 
 export const AGENT_DEFAULT_TIERS: Record<string, string> = Object.fromEntries(

@@ -2,7 +2,8 @@
 
 Read from `spawn_reviewer` in `code-review.md`, after `REVIEW_PATH`, `FILES_TO_READ` and
 `CONFIG_FILES` are built and before the reviewer spawn. It needs `REVIEW_FILES` and
-`PADDED_PHASE`.
+`PADDED_PHASE`, and passes `DIFF_BASE` when `compute_file_scope` set one, so each worker reviews
+the changed lines rather than whole files.
 
 Ask for a fan-out verdict over `REVIEW_FILES`. With `swarm.enabled` off it is a quiet `single`
 and the review runs exactly as before:
@@ -15,7 +16,8 @@ CODE_REVIEW_POINT=$(gsd_run query config-get workflow.code_review_point --raw 2>
   CODE_REVIEW_POINT="execute:post"
 }
 FANOUT=$(gsd_run loop fan-out-plan --cap-id code-review --point "$CODE_REVIEW_POINT" \
-  --agent gsd-code-reviewer --phase "$PADDED_PHASE" --scope-file "$SWARM_SCOPE_FILE")
+  --agent gsd-code-reviewer --phase "$PADDED_PHASE" --scope-file "$SWARM_SCOPE_FILE" \
+  ${DIFF_BASE:+--diff-base "$DIFF_BASE"})
 rm -f "$SWARM_SCOPE_FILE"
 ```
 

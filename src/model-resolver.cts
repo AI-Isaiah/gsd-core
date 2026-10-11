@@ -31,7 +31,7 @@ import { CONFIG_DEFAULTS as CANONICAL_CONFIG_DEFAULTS } from './configuration.cj
 import modelProfiles = require('./model-profiles.cjs');
 const { MODEL_PROFILES, AGENT_TO_PHASE_TYPE, AGENT_DEFAULT_TIERS, VALID_AGENT_TIERS, nextTier } = modelProfiles;
 
-import { MODEL_ALIAS_MAP, RUNTIME_PROFILE_MAP, PROVIDER_PRESETS, VALID_TIERS, CLAUDE_AGENT_ALIASES, mergeEffortTierDefaults } from './model-catalog.cjs';
+import { MODEL_ALIAS_MAP, RUNTIME_PROFILE_MAP, PROVIDER_PRESETS, VALID_TIERS, CLAUDE_AGENT_ALIASES, mergeEffortTierDefaults, AGENT_INHERIT_TIERS } from './model-catalog.cjs';
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -420,7 +420,9 @@ function computeProfileTier(config: Record<string, unknown>, agentType: string):
   return (phaseTypeTier && VALID_TIERS.has(phaseTypeTier))
     ? phaseTypeTier
     : (profile === 'inherit'
-      ? 'inherit'
+      // ADR-5273: an agent whose catalog row names an `inheritTier` keeps that tier even when
+      // the profile inherits the session model (the swarm worker stays on haiku).
+      ? (Object.hasOwn(AGENT_INHERIT_TIERS, agentType) ? AGENT_INHERIT_TIERS[agentType] : 'inherit')
       : (agentModels
         // Own-property guard: `profile` is a config-supplied string
         // (config['model_profile'], lower-cased); an already-lowercase

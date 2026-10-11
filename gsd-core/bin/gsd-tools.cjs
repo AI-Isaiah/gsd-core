@@ -3309,7 +3309,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       if (v === undefined || v.startsWith('--')) error(`Missing value for --${name}`, ERROR_REASON.USAGE);
       return v;
     };
-    const usage = 'Usage: loop fan-out-plan --cap-id <id> --point <point> --agent <agent> --phase <n> [--stage decompose|fan-out] [--units <file>] [--scope-file <file>]';
+    const usage = 'Usage: loop fan-out-plan --cap-id <id> --point <point> --agent <agent> --phase <n> [--stage decompose|fan-out] [--units <file>] [--scope-file <file>] [--diff-base <ref>]';
     const capId = valueOf('cap-id');
     const point = valueOf('point');
     const stepAgent = valueOf('agent');
@@ -3336,6 +3336,12 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     // #5273: the step's own input scope (code-review's REVIEW_FILES, one path per line). Forwarded
     // to the strategy unread; unlike --units it books no decomposition dispatch.
     const scopeFilePath = regularFile('scope-file', valueOf('scope-file'));
+    // #5273: the step's own diff base (code-review's DIFF_BASE), forwarded so a strategy can scope
+    // its units to the change. Validated as a revision here; core never runs git with it.
+    const diffBase = valueOf('diff-base');
+    if (diffBase !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._/~^@{}-]{0,199}$/.test(diffBase)) {
+      error(`--diff-base must be a git revision. ${usage}`, ERROR_REASON.USAGE);
+    }
 
     let resolved;
     try {
@@ -3359,6 +3365,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           const argv = [__filename, family, sub, '--cap-id', capId, '--point', point, '--agent', stepAgent, '--phase', phaseArg, '--stage', stage];
           if (unitsPath !== undefined) argv.push('--units', unitsPath);
           if (scopeFilePath !== undefined) argv.push('--scope-file', scopeFilePath);
+          if (diffBase !== undefined) argv.push('--diff-base', diffBase);
           const cp = require('node:child_process');
           const r = cp.spawnSync(process.execPath, argv, { cwd, encoding: 'utf8', timeout: 120000, maxBuffer: 8 * 1024 * 1024 });
           if (r.error) return { ok: false, detail: `${strategy.command}: ${r.error.message}` };

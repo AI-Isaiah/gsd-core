@@ -134,6 +134,78 @@ export function groupReviewFiles(files: readonly string[], maxWorkers: number): 
   return groups;
 }
 
+/**
+ * Changed lines per file, new side, from `git diff -U0` output (ADR-5273, live-run lesson
+ * 2026-10-11: whole-file review workers spent half their findings on code the change never
+ * touched). A pure deletion marks the line it sits at. A deleted file is not listed.
+ */
+export function parseDiffRanges(diff: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  let current: string[] | null = null;
+  for (const line of diff.split(/\r?\n/)) {
+    if (line.startsWith('+++ ')) {
+      const target = line.slice(4);
+      if (target === '/dev/null') { current = null; continue; }
+      const p = target.startsWith('b/') ? target.slice(2) : target;
+      current = out.get(p) ?? [];
+      out.set(p, current);
+      continue;
+    }
+    const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (m === null || current === null) continue;
+    const start = Number(m[1]);
+    const count = m[2] === undefined ? 1 : Number(m[2]);
+    if (count === 0) current.push(String(Math.max(start, 1)));
+    else current.push(count === 1 ? String(start) : `${start}-${start + count - 1}`);
+  }
+  return out;
+}
+
+/** The number of lines a range list covers. */
+export function rangeLineCount(ranges: readonly string[]): number {
+  let n = 0;
+  for (const r of ranges) {
+    const [a, b] = r.split('-').map(Number);
+    n += b === undefined ? 1 : Math.max(b - a + 1, 1);
+  }
+  return n;
+}
+
+/**
+ * Review units of about `REVIEW_UNIT_LINES` lines each (ADR-5273, live-run lesson 2026-10-11).
+ * Every worker pays a fixed context cost (measured: 44 K tokens for a 93-line file), so small
+ * pieces of work share a worker: files are packed in order until the next would push the unit
+ * past the line budget, or the unit holds `REVIEW_UNIT_FILES` files. A file at or over the budget
+ * is a unit on its own. Packing never leaves
+ * fewer than `MIN_WORKERS` units when there were that many files, and never more than
+ * `maxWorkers`: past that, `groupReviewFiles` splits evenly.
+ */
+export const REVIEW_UNIT_LINES = 150;
+
+/** At most this many files share a unit, so `REVIEW_MAX_FINDINGS` is not spread too thin. */
+export const REVIEW_UNIT_FILES = 5;
+
+export function packReviewUnits(files: readonly string[], weight: (f: string) => number, maxWorkers: number): string[][] {
+  const unique = [...new Set(files)];
+  const packed: string[][] = [];
+  let group: string[] = [];
+  let lines = 0;
+  for (const f of unique) {
+    const w = Math.max(weight(f), 1);
+    if (group.length > 0 && (lines + w > REVIEW_UNIT_LINES || group.length >= REVIEW_UNIT_FILES)) {
+      packed.push(group);
+      group = [];
+      lines = 0;
+    }
+    group.push(f);
+    lines += w;
+  }
+  if (group.length > 0) packed.push(group);
+  if (packed.length < MIN_WORKERS && unique.length >= MIN_WORKERS) return groupReviewFiles(unique, Math.min(unique.length, MIN_WORKERS));
+  if (packed.length > maxWorkers) return groupReviewFiles(unique, maxWorkers);
+  return packed;
+}
+
 /** Parse a `--scope-file`: one path per line, blank lines and surrounding whitespace ignored. */
 export function parseScopeFile(text: string): string[] {
   return text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
@@ -235,7 +307,22 @@ const REVIEW_BUDGET = `Report at most ${REVIEW_MAX_FINDINGS} findings, most seve
 
 const REVIEW_TASK = `Review these files for defects: bugs, security issues and code-quality problems. Report each finding with its severity, the exact lines and a verbatim quote. Report only what the quoted lines show. ${REVIEW_BUDGET}`;
 
-function workerPrompt(task: string, scope: readonly string[], schema: object): string {
+/** How a worker reads a diff-scoped unit: around the changes, not the whole file. */
+const DIFF_FOCUS = 'Review the lines listed in <changed_lines> and the code they directly touch. Read each file around those ranges with Read offset and limit, about 30 lines either side; read further only when a change cannot be judged otherwise. Report a defect outside the changed lines only when a change causes it. A file marked "whole file" has no diff ranges: review all of it.';
+
+/** At most this many ranges are listed per file; a file changed in more places is reviewed whole. */
+const MAX_RANGES_PER_FILE = 40;
+
+function changedLinesBlock(files: readonly string[], changed: Record<string, string[]> | undefined): string[] {
+  if (changed === undefined) return [];
+  const rows = files.map((f) => {
+    const r = Object.hasOwn(changed, f) ? changed[f] : undefined;
+    return r !== undefined && r.length > 0 && r.length <= MAX_RANGES_PER_FILE ? `${f}: ${r.join(', ')}` : `${f}: whole file`;
+  });
+  return ['<changed_lines>', ...rows, '</changed_lines>'];
+}
+
+function workerPrompt(task: string, scope: readonly string[], schema: object, extra: readonly string[] = []): string {
   return [
     '<task>',
     task,
@@ -243,6 +330,7 @@ function workerPrompt(task: string, scope: readonly string[], schema: object): s
     '<scope>',
     ...scope,
     '</scope>',
+    ...extra,
     ...schemaBlock(schema),
     `Answer with one JSON object matching <schema>, under ${ANSWER_MAX_BYTES} bytes. Cite every claim with path, lines and a verbatim quote, or return not_found.`,
   ].join('\n');
@@ -316,6 +404,13 @@ export interface PlanInput {
   files?: string[];
   /** Project root; review files that fail core's containment (e.g. deleted in the diff) are skipped. */
   projectRoot: string;
+  /**
+   * code-reviewer: changed lines per file from the step's diff base (`parseDiffRanges`). Absent
+   * when the step has no diff base; a file missing from it is reviewed whole.
+   */
+  changedLines?: Record<string, string[]>;
+  /** code-reviewer: each file's line count, for packing files with no diff ranges. */
+  lineCounts?: Record<string, number>;
   /** Repo-relative phase inputs the decomposition reads (CONTEXT.md, RESEARCH.md), when they exist. */
   phaseInputs?: string[];
 }
@@ -361,16 +456,24 @@ export function buildSwarmPlan(input: PlanInput): FanOutPlan | Single {
       return single(SWARM_REASON.SCOPE_TOO_LARGE, `${files.length} files in scope; the cross-file worker can hold at most ${SCOPE_MAX_PATHS}`);
     }
     if (files.length < MIN_WORKERS) return single(SWARM_REASON.TOO_FEW_UNITS, `${files.length} file(s) in scope; one file never fans out`);
-    const groups = groupReviewFiles(files, config.maxWorkers);
+    const changed = input.changedLines;
+    const counts = input.lineCounts ?? {};
+    const weight = (f: string): number => {
+      const r = changed !== undefined && Object.hasOwn(changed, f) ? changed[f] : undefined;
+      if (r !== undefined && r.length > 0 && r.length <= MAX_RANGES_PER_FILE) return rangeLineCount(r);
+      return Object.hasOwn(counts, f) ? counts[f] : REVIEW_UNIT_LINES;
+    };
+    const groups = packReviewUnits(files, weight, config.maxWorkers);
+    const focus = changed === undefined ? '' : ` ${DIFF_FOCUS}`;
     workers = groups.map((g) => dispatch(
       'worker', FAN_OUT_WORKER_AGENT, input.worker,
-      workerPrompt(REVIEW_TASK, g, REVIEW_ANSWER_SCHEMA),
+      workerPrompt(`${REVIEW_TASK}${focus}`, g, REVIEW_ANSWER_SCHEMA, changedLinesBlock(g, changed)),
       REVIEW_ANSWER_SCHEMA, g,
     ));
     const all = files;
     crossFile = [dispatch(
       'cross-file', FAN_OUT_WORKER_AGENT, input.step,
-      workerPrompt(`Find defects that span more than one of these files: broken contracts between caller and callee, inconsistent assumptions, data flowing unchecked across a boundary. Ignore defects local to one file; other workers cover them. ${REVIEW_BUDGET}`, all, REVIEW_ANSWER_SCHEMA),
+      workerPrompt(`Find defects that span more than one of these files: broken contracts between caller and callee, inconsistent assumptions, data flowing unchecked across a boundary. Ignore defects local to one file; other workers cover them. ${REVIEW_BUDGET}${focus}`, all, REVIEW_ANSWER_SCHEMA, changedLinesBlock(all, changed)),
       REVIEW_ANSWER_SCHEMA, all,
     )];
   } else {

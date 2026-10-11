@@ -57,7 +57,8 @@ describe('code-review spawn site: the fan-out step file, executed', () => {
   before(() => {
     tmp = createTempProject('gsd-swarm-sites-');
     fs.mkdirSync(path.join(tmp, 'src'));
-    for (const f of ['a.ts', 'b c.ts', 'd.ts']) fs.writeFileSync(path.join(tmp, 'src', f), 'export {};\n');
+    // 160 lines each: past REVIEW_UNIT_LINES, so every file is its own review unit.
+    for (const f of ['a.ts', 'b c.ts', 'd.ts']) fs.writeFileSync(path.join(tmp, 'src', f), 'export {};\n'.repeat(160));
     fs.mkdirSync(path.join(tmp, '.planning', 'phases', '01-demo'), { recursive: true });
   });
   after(() => cleanup(tmp));

@@ -934,6 +934,22 @@ describe('bug #1829: model_profile "inherit" — resolveModelInternal', () => {
     assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-nonexistent'), 'inherit');
   });
 
+  test('ADR-5273: gsd-swarm-worker keeps its catalog inheritTier (haiku) under the inherit profile', () => {
+    writeConfig(tmpDir, { model_profile: 'inherit' });
+    assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-swarm-worker'), 'haiku');
+    assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-code-reviewer'), 'inherit', 'its synthesizer still inherits');
+  });
+
+  test('ADR-5273: inheritTier is the swarm worker\'s alone; every other catalog agent inherits', () => {
+    const { AGENT_INHERIT_TIERS } = require('../gsd-core/bin/lib/model-catalog.cjs');
+    assert.deepStrictEqual(AGENT_INHERIT_TIERS, { 'gsd-swarm-worker': 'haiku' });
+  });
+
+  test('ADR-5273: an explicit model_overrides pin still beats the swarm worker\'s inheritTier', () => {
+    writeConfig(tmpDir, { model_profile: 'inherit', model_overrides: { 'gsd-swarm-worker': 'sonnet' } });
+    assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-swarm-worker'), 'sonnet');
+  });
+
   test('per-agent override takes precedence over inherit profile', () => {
     writeConfig(tmpDir, {
       model_profile: 'inherit',

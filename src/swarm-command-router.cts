@@ -12,6 +12,7 @@
  */
 
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -39,6 +40,7 @@ import {
   checkAnswers,
   buildTelemetryEntry,
   buildRepairs,
+  parseDiffRanges,
 } from './swarm.cjs';
 import type { Unit, RawAnswer } from './swarm.cjs';
 import { FAN_OUT_WORKER_AGENT, checkWorkerAnswer } from './fan-out-plan.cjs';
@@ -117,7 +119,7 @@ function readBoundedFile(p: string): { ok: true; text: string } | { ok: false; d
 
 function handlePlan(opts: RouteSwarmCommandOptions): unknown {
   const { args, cwd, raw } = opts;
-  const usage = 'Usage: gsd-tools swarm plan --agent <agent> --phase <n> --stage decompose|fan-out [--units <file>] [--scope-file <file>]';
+  const usage = 'Usage: gsd-tools swarm plan --agent <agent> --phase <n> --stage decompose|fan-out [--units <file>] [--scope-file <file> [--diff-base <ref>]]';
   const agent = flagValue(args, '--agent');
   const phase = flagValue(args, '--phase');
   const stage = flagValue(args, '--stage') || 'fan-out';
@@ -187,6 +189,23 @@ function handlePlan(opts: RouteSwarmCommandOptions): unknown {
     files = parseScopeFile(file.text);
   }
 
+  // Live-run lesson (2026-10-11): review workers read only around the change when the step has a
+  // diff base. A failed diff leaves changedLines undefined, so the units are reviewed whole.
+  let changedLines: Record<string, string[]> | undefined;
+  let lineCounts: Record<string, number> | undefined;
+  const diffBase = flagValue(args, '--diff-base');
+  if (files !== undefined) {
+    lineCounts = {};
+    for (const f of files) {
+      const r = readBoundedFile(path.resolve(cwd, f));
+      if (r.ok) lineCounts[f] = r.text.split('\n').length;
+    }
+    if (diffBase) {
+      if (!DIFF_BASE_RE.test(diffBase)) return makeInvalidArgs('diff-base', `--diff-base must be a git revision. ${usage}`, ERROR_REASON.USAGE);
+      changedLines = diffRanges(cwd, diffBase, files);
+    }
+  }
+
   // The decomposition reads the phase's own inputs; name the ones that exist so it never guesses.
   const phaseInputs: string[] = [];
   const found = findPhaseInternal(cwd, phase);
@@ -197,7 +216,7 @@ function handlePlan(opts: RouteSwarmCommandOptions): unknown {
     }
   }
 
-  output(buildSwarmPlan({ stage, role, stepAgent: agent, phase, config: cfg.config, worker, step, units, files, projectRoot: cwd, phaseInputs }), raw);
+  output(buildSwarmPlan({ stage, role, stepAgent: agent, phase, config: cfg.config, worker, step, units, files, projectRoot: cwd, phaseInputs, changedLines, lineCounts }), raw);
   return undefined;
 }
 
@@ -340,6 +359,18 @@ function handleVerifyAnchors(opts: RouteSwarmCommandOptions): unknown {
     output({ verdict: r.verdict, reason: r.reason, total: r.total, failures: r.failures, written: false }, raw);
   }
   return undefined;
+}
+
+/** A git revision as a review step names it: no leading dash, no whitespace or control characters. */
+const DIFF_BASE_RE = /^[A-Za-z0-9][A-Za-z0-9._/~^@{}-]{0,199}$/;
+
+/** `git diff -U0 <base> -- <files>` as changed-line ranges; undefined when git cannot answer. */
+function diffRanges(cwd: string, base: string, files: readonly string[]): Record<string, string[]> | undefined {
+  const r = spawnSync('git', ['-c', 'core.quotepath=off', 'diff', '-U0', '--no-color', '--no-ext-diff', '--no-renames', base, '--', ...files], {
+    cwd, encoding: 'utf8', timeout: 30000, maxBuffer: 64 * 1024 * 1024, windowsHide: true,
+  });
+  if (r.error || r.status !== 0) return undefined;
+  return Object.fromEntries(parseDiffRanges(String(r.stdout)));
 }
 
 function routeSwarmCommand(opts: RouteSwarmCommandOptions): void {

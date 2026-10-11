@@ -108,7 +108,8 @@ post-steps below are its commands (`gsd_run swarm …`). `<role>` is the swarm r
 | code-review | `code-review` | `$CODE_REVIEW_POINT` | `gsd-code-reviewer` | `${REVIEW_PATH}` |
 
 1. **Plan.** Code-review writes `REVIEW_FILES` one path per line to a temporary file and passes
-   it as `--scope-file`, with the default stage. Research and pattern mapping pass
+   it as `--scope-file`, with the default stage, plus `--diff-base "$DIFF_BASE"` when it has one,
+   so each worker reviews the changed lines instead of whole files. Research and pattern mapping pass
    `--stage decompose` first. Note the start time for `wall_clock_ms`.
 2. **`single` verdict.** Print the loud banner when `loud` is `true`, then run the site's own
    spawn unchanged. When `loud` is `false`, print nothing, record nothing, and run the site's own
