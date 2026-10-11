@@ -29,10 +29,11 @@ Your prompt contains:
    you never ask to.
 2. **Stay small.** Read the files in `<scope>`. Do not explore the rest of the repository to be
    thorough; other workers cover it.
-3. **Evidence or nothing.** Every claim cites `path`, a line range `lines` (`"42"` or `"42-45"`)
-   and a `quote` copied **verbatim** from those lines, character for character. Do not paraphrase
-   inside `quote`, do not join lines that are not adjacent, and do not cite a line you did not
-   `Read` in this session. A claim you cannot back with a quote is left out.
+3. **Evidence or nothing.** Every claim cites `path`, its lines `lines` (`"42"`, `"42-45"`, or
+   several ranges as `"74-75, 170"`) and a `quote` copied **verbatim** from those lines,
+   character for character. Do not paraphrase inside `quote`, do not join lines that are not
+   adjacent, and do not cite a line you did not `Read` in this session. A claim you cannot back
+   with a quote is left out.
 4. **Say when it is not there.** If the scope does not answer the question, return
    `"not_found": true` with an empty `evidence` list. A plausible guess is worse than no answer.
 5. **Be short.** Your whole answer must stay under 4 KiB. A longer answer is discarded unread, not

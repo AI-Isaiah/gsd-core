@@ -165,6 +165,12 @@ export function readUnits(answer: unknown, projectRoot: string): { ok: true; uni
 /** The executor replaces this token in the synthesizer prompt with the `<swarm_worker_answers>` block. */
 export const ANSWERS_SLOT = '<swarm_worker_answers_slot/>';
 
+/** The `lines` grammar, shared by the schemas the worker reads and the check that enforces them. */
+const LINES_PATTERN = '[1-9]\\d*(?:-[1-9]\\d*)?(?:, ?[1-9]\\d*(?:-[1-9]\\d*)?)*';
+
+/** At most this many findings per review worker, so an answer fits `ANSWER_MAX_BYTES`. */
+export const REVIEW_MAX_FINDINGS = 5;
+
 export const WORKER_ANSWER_SCHEMA = Object.freeze({
   type: 'object',
   required: ['answer', 'evidence', 'not_found', 'confidence'],
@@ -172,7 +178,7 @@ export const WORKER_ANSWER_SCHEMA = Object.freeze({
     answer: { type: 'string' },
     evidence: {
       type: 'array',
-      items: { type: 'object', required: ['path', 'lines', 'quote'], properties: { path: { type: 'string' }, lines: { type: 'string' }, quote: { type: 'string' } } },
+      items: { type: 'object', required: ['path', 'lines', 'quote'], properties: { path: { type: 'string' }, lines: { type: 'string', pattern: `^${LINES_PATTERN}$` }, quote: { type: 'string' } } },
     },
     not_found: { type: 'boolean' },
     confidence: { enum: ['high', 'medium', 'low'] },
@@ -185,6 +191,7 @@ export const REVIEW_ANSWER_SCHEMA = Object.freeze({
   properties: {
     findings: {
       type: 'array',
+      maxItems: REVIEW_MAX_FINDINGS,
       items: {
         type: 'object',
         required: ['severity', 'title', 'path', 'lines', 'quote', 'issue'],
@@ -192,7 +199,7 @@ export const REVIEW_ANSWER_SCHEMA = Object.freeze({
           severity: { enum: ['critical', 'warning', 'info'] },
           title: { type: 'string' },
           path: { type: 'string' },
-          lines: { type: 'string' },
+          lines: { type: 'string', pattern: `^${LINES_PATTERN}$` },
           quote: { type: 'string' },
           issue: { type: 'string' },
           fix: { type: 'string' },
@@ -218,6 +225,15 @@ export const DECOMPOSE_SCHEMA = Object.freeze({
 function schemaBlock(schema: object): string[] {
   return ['<schema>', JSON.stringify(schema), '</schema>'];
 }
+
+/**
+ * The review answer budget. An answer over `ANSWER_MAX_BYTES` is dropped whole, so a worker that
+ * finds more must choose: the most severe findings, short fields. Measured 2026-10-11 on a real
+ * 19-file review: unbudgeted Haiku answers of 7-10 findings ran 4.2-6.8 KiB and 5 of 20 were dropped.
+ */
+const REVIEW_BUDGET = `Report at most ${REVIEW_MAX_FINDINGS} findings, most severe first; if you found more, drop the least severe. Keep each quote to one line of at most 160 characters, each issue under 300 characters and each fix under 200, so the whole answer stays under ${ANSWER_MAX_BYTES} bytes: a longer answer is discarded, not cut.`;
+
+const REVIEW_TASK = `Review these files for defects: bugs, security issues and code-quality problems. Report each finding with its severity, the exact lines and a verbatim quote. Report only what the quoted lines show. ${REVIEW_BUDGET}`;
 
 function workerPrompt(task: string, scope: readonly string[], schema: object): string {
   return [
@@ -348,13 +364,13 @@ export function buildSwarmPlan(input: PlanInput): FanOutPlan | Single {
     const groups = groupReviewFiles(files, config.maxWorkers);
     workers = groups.map((g) => dispatch(
       'worker', FAN_OUT_WORKER_AGENT, input.worker,
-      workerPrompt('Review these files for defects: bugs, security issues and code-quality problems. Report each finding with its severity, the exact lines and a verbatim quote. Report only what the quoted lines show.', g, REVIEW_ANSWER_SCHEMA),
+      workerPrompt(REVIEW_TASK, g, REVIEW_ANSWER_SCHEMA),
       REVIEW_ANSWER_SCHEMA, g,
     ));
     const all = files;
     crossFile = [dispatch(
       'cross-file', FAN_OUT_WORKER_AGENT, input.step,
-      workerPrompt('Find defects that span more than one of these files: broken contracts between caller and callee, inconsistent assumptions, data flowing unchecked across a boundary. Ignore defects local to one file; other workers cover them.', all, REVIEW_ANSWER_SCHEMA),
+      workerPrompt(`Find defects that span more than one of these files: broken contracts between caller and callee, inconsistent assumptions, data flowing unchecked across a boundary. Ignore defects local to one file; other workers cover them. ${REVIEW_BUDGET}`, all, REVIEW_ANSWER_SCHEMA),
       REVIEW_ANSWER_SCHEMA, all,
     )];
   } else {
@@ -390,7 +406,12 @@ export interface AnswerCheck {
   block: string;
 }
 
-const LINES_RE = /^[1-9]\d*(?:-[1-9]\d*)?$/;
+/**
+ * A worker cites one range (`42`, `42-45`) or several, comma-separated (`74-75,170`, `74, 80-81`):
+ * one finding can rest on lines that are not adjacent. Anchors stay one range each; the
+ * synthesizer writes one anchor per range.
+ */
+const LINES_RE = new RegExp(`^${LINES_PATTERN}$`);
 
 function isStr(v: unknown): v is string {
   return typeof v === 'string';
@@ -402,10 +423,13 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 /** Shape check for one parsed answer against the role's schema; returns a reason code or null. */
 export function answerShapeError(role: SwarmRole, answer: Record<string, unknown>): string | null {
-  if (typeof answer['not_found'] !== 'boolean') return 'schema_not_found';
   if (role === 'code-reviewer') {
     const findings = answer['findings'];
     if (!Array.isArray(findings)) return 'schema_findings';
+    // A review answer's `not_found` is implied by its findings: a worker that lists findings and
+    // omits the flag has said everything the flag would. Only an empty list needs it stated.
+    const nf = answer['not_found'];
+    if (nf !== undefined ? typeof nf !== 'boolean' : findings.length === 0) return 'schema_not_found';
     for (const f of findings) {
       if (!isRecord(f)) return 'schema_finding';
       if (!['critical', 'warning', 'info'].includes(f['severity'] as string)) return 'schema_severity';
@@ -414,6 +438,7 @@ export function answerShapeError(role: SwarmRole, answer: Record<string, unknown
     }
     return null;
   }
+  if (typeof answer['not_found'] !== 'boolean') return 'schema_not_found';
   if (!isStr(answer['answer'])) return 'schema_answer';
   if (!['high', 'medium', 'low'].includes(answer['confidence'] as string)) return 'schema_confidence';
   const evidence = answer['evidence'];
