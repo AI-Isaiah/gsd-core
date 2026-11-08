@@ -336,7 +336,7 @@ Read and execute: `$HOME/.claude/gsd-core/references/autonomous-ui-design-contra
 
 **3b. Plan**
 
-**If `INTERACTIVE` is set:** Background dispatch is only safe on a runtime where a backgrounded agent can still nest the pipeline's subagents (plan-checker / worktree executors / verifier). This is determined from the documentation-sourced dispatch capability in the registry (#1708); Claude Code's backgrounded agents have no `Agent`/`Task` tool, and every other runtime either prohibits nested subagents or disables them by default. So run **inline** everywhere except where `dispatch-should-flatten` returns `false`. Resolve first:
+**If `INTERACTIVE` is set:** Background dispatch is only safe on a runtime where a backgrounded agent can still nest the pipeline's subagents (plan-checker / worktree executors / verifier). This is determined from the documentation-sourced dispatch capability in the registry (#1708); on Claude Code a backgrounded agent keeps its `Agent` tool and can nest up to three layers below the main conversation (host-integration capability matrix, #6007), and most other runtimes either prohibit nested subagents or disable them by default. So run **inline** everywhere except where `dispatch-should-flatten` returns `false`. Resolve first:
 
 ```bash
 FLATTEN=$(gsd_run query dispatch-should-flatten --raw 2>/dev/null || echo "true")
