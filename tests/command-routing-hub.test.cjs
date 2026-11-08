@@ -1637,10 +1637,14 @@ describe('bug-853 — manager/autonomous gate background dispatch by runtime', (
     assert.ok(matches.length >= 2, 'manager.md must use dispatch-should-flatten for both plan and execute dispatch');
   });
 
-  test('manager.md documents why most runtimes cannot background-dispatch', () => {
-    // Accept both old singular form (backgrounded agent has no) and new plural form (backgrounded agents have no)
+  test('manager.md states the re-measured Claude Code fact at both dispatch sites (#6007)', () => {
+    // #6007: Claude Code 2.1.319 and the live sub-agents docs show a backgrounded agent
+    // keeps `Agent` below the depth limit. The prose an agent reads about its own tool set
+    // must say so, at the plan site and the execute site, and the retired claim must be gone.
     // allow-test-rule: source-text-is-the-product (see #1708)
-    assert.match(MANAGER, /backgrounded agents? ha(?:s|ve) no `Agent`\/`Task` tool/);
+    const sites = MANAGER.match(/on Claude Code a backgrounded agent keeps its `Agent` tool/g) || [];
+    assert.ok(sites.length >= 2, `manager.md must state the #6007 fact at both dispatch sites, found ${sites.length}`);
+    assert.doesNotMatch(MANAGER, /backgrounded agents? ha(?:s|ve) no `Agent`\/`Task` tool/);
   });
 
   test('manager.md gates background dispatch on FLATTEN=false and runs plan/execute inline otherwise', () => {
@@ -1694,8 +1698,9 @@ describe('bug-853 — manager/autonomous gate background dispatch by runtime', (
     // allow-test-rule: source-text-is-the-product (see #1708)
     const autoFlattenMatches = AUTONOMOUS.match(/dispatch-should-flatten/g) || [];
     assert.ok(autoFlattenMatches.length >= 2, 'autonomous.md must use dispatch-should-flatten in both 3b (plan) and 3c (execute) interactive branches');
-    // Accept both old singular form (backgrounded agent has no) and new plural form (backgrounded agents have no)
-    assert.match(AUTONOMOUS, /backgrounded agents? ha(?:s|ve) no `Agent`\/`Task` tool/);
+    // #6007: the re-measured Claude Code fact replaces the retired "no Agent/Task tool" claim.
+    assert.match(AUTONOMOUS, /on Claude Code a backgrounded agent keeps its `Agent` tool/);
+    assert.doesNotMatch(AUTONOMOUS, /backgrounded agents? ha(?:s|ve) no `Agent`\/`Task` tool/);
   });
 
   test('autonomous.md gates interactive background dispatch on FLATTEN=false; runs plan/execute inline otherwise', () => {
@@ -1732,7 +1737,7 @@ describe('dispatch-should-flatten query — behavioral', () => {
   //
   // Registry values (from host-integration-capability-matrix.md):
   //   codex:   background=true, backgroundDispatch=true, BUT maxDepth:1  → shouldFlatten=true  (must inline — #2939: depth budget insufficient for a bg orchestrator + leaf)
-  //   claude:  background=true, backgroundDispatch=false                 → shouldFlatten=true  (must inline)
+  //   claude:  background=true, backgroundDispatch=true, maxDepth:3      → shouldFlatten=false (may background — #6007 re-measure)
   //   cursor:  background=true, backgroundDispatch=true, maxDepth:2      → shouldFlatten=false (may background — the one shipped host with a sufficient depth budget)
   //   unknown: no entry → fail-closed                                   → shouldFlatten=true  (must inline)
 
@@ -1749,14 +1754,14 @@ describe('dispatch-should-flatten query — behavioral', () => {
     }
   });
 
-  test('runtime=claude → shouldFlatten=true (must inline)', () => {
+  test('runtime=claude → shouldFlatten=false (#6007: a backgrounded agent keeps Agent, depth 3)', () => {
     const tmpDir = createTempProject();
     try {
       const result = runGsdTools(['query', 'dispatch-should-flatten', '--raw'], tmpDir, {
         GSD_RUNTIME: 'claude',
       });
       assert.ok(result.success, `Expected success, got error: ${result.error}`);
-      assert.strictEqual(result.output, 'true', `claude should return true (must inline), got: ${result.output}`);
+      assert.strictEqual(result.output, 'false', `#6007: claude should return false (may background), got: ${result.output}`);
     } finally {
       cleanupDir(tmpDir);
     }
@@ -1800,6 +1805,25 @@ describe('dispatch-should-flatten query — behavioral', () => {
       });
       assert.ok(result.success, `Expected success, got error: ${result.error}`);
       assert.strictEqual(result.output, 'false', `cursor should return false (may background), got: ${result.output}`);
+    } finally {
+      cleanupDir(tmpDir);
+    }
+  });
+
+  test('runtime=claude --json carries the #6007 descriptor (backgroundDispatch:true, maxDepth:3)', () => {
+    // The verdict must come from the re-measured descriptor, not from a runtime-name check:
+    // the JSON form shows the axes the verdict was computed from.
+    const tmpDir = createTempProject();
+    try {
+      const result = runGsdTools(['query', 'dispatch-should-flatten', '--json'], tmpDir, {
+        GSD_RUNTIME: 'claude',
+      });
+      assert.ok(result.success, `Expected success, got error: ${result.error}`);
+      const parsed = JSON.parse(result.output);
+      assert.strictEqual(parsed.runtime, 'claude');
+      assert.strictEqual(parsed.shouldFlatten, false);
+      assert.strictEqual(parsed.dispatch.backgroundDispatch, true);
+      assert.strictEqual(parsed.dispatch.maxDepth, 3);
     } finally {
       cleanupDir(tmpDir);
     }
