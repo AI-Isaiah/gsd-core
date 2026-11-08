@@ -307,9 +307,11 @@ describe('ADR-1239 Phase A: hostIntegration descriptors', () => {
 
   // ─── shouldFlattenDispatch per-host (#853 discriminator) ─────────────────────
 
-  // Expected: false (may background) ONLY for cursor — the one shipped host whose
-  // dispatch declares nested:true + subagentToolkit:"full" + a depth budget > 1.
-  // true (must inline) for the other 17.
+  // Expected: false (may background) ONLY for cursor and claude — the shipped hosts whose
+  // dispatch declares background + backgroundDispatch + nested:true +
+  // subagentToolkit:"full" + a depth budget > 1. true (must inline) for the rest.
+  // #6007: claude joined the set when the Claude Code 2.1.319 re-measure showed a
+  // backgrounded agent keeps `Agent` below the depth limit (default 3 layers).
   //
   // #2939: the depth-aware rule reclassifies codex/kimi/kimi-code, which the old
   // two-field (background+backgroundDispatch) rule admitted as background-eligible
@@ -321,7 +323,7 @@ describe('ADR-1239 Phase A: hostIntegration descriptors', () => {
   const EXPECTED_FLATTEN = {
     antigravity: true,
     augment:     true,
-    claude:      true,
+    claude:      false,
     cline:       true,
     codebuddy:   true,
     codex:       true,
@@ -369,6 +371,28 @@ describe('ADR-1239 Phase A: hostIntegration descriptors', () => {
       );
     });
   }
+
+  // #6007 / #2939: the depth gate still holds on the re-measured claude shape. If a user caps
+  // CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH at 1 (nesting off), a backgrounded orchestrator has
+  // no layer left for its leaves, so the verdict must flip back to flatten.
+  for (const [maxDepth, expected] of [[1, true], [2, false], [3, false]]) {
+    test('shouldFlattenDispatch(claude shape, maxDepth:' + maxDepth + ') === ' + expected + ' (#6007 boundary)', () => {
+      const claudeDispatch = registry.runtimes.claude.runtime.hostIntegration.dispatch;
+      assert.strictEqual(shouldFlattenDispatch({ ...claudeDispatch, maxDepth }), expected);
+    });
+  }
+
+  test('#6007: the matrix claude rows agree with the descriptor and cite the spike record', () => {
+    const section = matrixSection('claude');
+    assert.ok(section, 'matrix must have a ## claude section');
+    const dispatch = registry.runtimes.claude.runtime.hostIntegration.dispatch;
+    assert.equal(matrixValue(section, 'dispatch.backgroundDispatch'), String(dispatch.backgroundDispatch));
+    assert.equal(matrixValue(section, 'dispatch.maxDepth'), String(dispatch.maxDepth));
+    for (const axis of ['dispatch.backgroundDispatch', 'dispatch.maxDepth']) {
+      const row = section.split('\n').find((l) => l.startsWith(`| ${axis} |`));
+      assert.match(row, /docs\/research\/2026-11-08-claude-code-background-nesting\.md/, `${axis} row must cite the spike record`);
+    }
+  });
 
   test('contract-pin: background-eligible set matches EXPECTED_FLATTEN (count-agnostic)', () => {
     // The eligible set is DERIVED from the curated EXPECTED_FLATTEN map rather
