@@ -597,10 +597,10 @@ const capabilities = {
         "dispatch": {
           "namedDispatch": true,
           "nested": true,
-          "maxDepth": 5,
+          "maxDepth": 3,
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": false,
+          "backgroundDispatch": true,
           "isolation": "harness-worktree",
           "maxConcurrency": 20
         },
@@ -6093,10 +6093,10 @@ const runtimes = {
         "dispatch": {
           "namedDispatch": true,
           "nested": true,
-          "maxDepth": 5,
+          "maxDepth": 3,
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": false,
+          "backgroundDispatch": true,
           "isolation": "harness-worktree",
           "maxConcurrency": 20
         },
