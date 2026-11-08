@@ -390,7 +390,7 @@ describe('ADR-1239 Phase A: hostIntegration descriptors', () => {
     assert.equal(matrixValue(section, 'dispatch.maxDepth'), String(dispatch.maxDepth));
     for (const axis of ['dispatch.backgroundDispatch', 'dispatch.maxDepth']) {
       const row = section.split('\n').find((l) => l.startsWith(`| ${axis} |`));
-      assert.match(row, /docs\/research\/2026-11-08-claude-code-background-nesting\.md/, `${axis} row must cite the spike record`);
+      assert.match(row, /\]\(\.\.\/research\/2026-11-08-claude-code-background-nesting\.md\)/, `${axis} row must cite the spike record`);
     }
   });
 
