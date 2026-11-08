@@ -301,9 +301,10 @@ function detectWorkflowBackend(input: DetectInput | null | undefined): DetectRes
   //    gated at step 2; `background:true` alone is true on several non-Claude hosts,
   //    so the proxy is only meaningful after the runtime check above. Note: this is
   //    NOT the canonical `shouldFlattenDispatch` rule (which keys on
-  //    `backgroundDispatch`); the Workflow backend works precisely because a single
-  //    tool-call orchestrates internally, sidestepping the backgroundDispatch:false
-  //    limitation. Missing/false/foreign descriptor → fail-closed.
+  //    `backgroundDispatch`); the Workflow backend works because a single tool-call
+  //    orchestrates internally, so it does not depend on whether a backgrounded agent
+  //    can nest (true for claude since the #6007 re-measure, false on older Claude
+  //    Code). Missing/false/foreign descriptor → fail-closed.
   const hi = input.hostIntegration;
   if (hi === null || hi === undefined || typeof hi !== 'object' || Array.isArray(hi)) {
     return inline('workflow_tool_unavailable');

@@ -11,11 +11,16 @@ sequentially, and plans *within* a wave run in parallel when their
 `files_modified` sets don't overlap. On most runtimes GSD realizes that by
 fanning out one backgrounded `gsd-executor` agent (in a worktree) per plan.
 
-On **Claude Code** that fan-out degrades. Backgrounded agents on Claude Code have
-no `Agent`/`Task` tool, so they cannot nest subagents ([#853]). The autonomous
-loop therefore falls back to **inline sequential execution** — and with it
-silently drops wave parallelism, the plan-checker, and the verifier — on the one
-runtime most GSD users run.
+On **Claude Code** that fan-out used to degrade. On Claude Code 2.1.177 (the
+spike behind #1184), backgrounded agents had no `Agent`/`Task` tool, so they
+could not nest subagents ([#853]). The autonomous loop therefore fell back to
+**inline sequential execution** — and with it silently dropped wave parallelism,
+the plan-checker, and the verifier — on the one runtime most GSD users run.
+A re-measure on Claude Code 2.1.319 ([#6007]) shows that a backgrounded agent
+now keeps `Agent` and can nest up to three layers below the main conversation,
+so `dispatch-should-flatten` no longer forces Claude Code inline. The axis
+values and their sources are in the
+[capability matrix §claude](../reference/host-integration-capability-matrix.md#claude).
 
 Claude Code ships an orchestration primitive that sidesteps exactly this: the
 **Workflow tool** (Claude Code's dynamic workflows, the engine behind `/effort ultracode`).
@@ -136,3 +141,4 @@ own runtime gate continues to no-op on non-Claude runtimes.
 [#2285]: https://github.com/open-gsd/gsd-core/issues/2285
 [#4740]: https://github.com/open-gsd/gsd-core/issues/4740
 [#4747]: https://github.com/open-gsd/gsd-core/issues/4747
+[#6007]: https://github.com/open-gsd/gsd-core/issues/6007

@@ -232,3 +232,18 @@ still return. `metadata: null` on a worktree plan remains the #3302 halt conditi
 
 **Not changed:** the backend still has no loop dispatch path (2026-09-14 amendment). Which route
 should wire it is a separate decision, outside this amendment.
+
+## Amendment (2026-11-08): the #853 premise no longer holds on current Claude Code
+
+The Context above says backgrounded agents on Claude Code lack the `Agent`/`Task` tool. That matched
+the Claude Code 2.1.177 spike behind #1184. A re-measure on Claude Code 2.1.319 for
+[#6007](https://github.com/open-gsd/gsd-core/issues/6007) found that a backgrounded agent keeps
+`Agent` and can nest up to three layers below the main conversation by default. The `claude` dispatch
+descriptor now declares `backgroundDispatch: true` and `maxDepth: 3`, so `dispatch-should-flatten`
+returns `false` on Claude Code. The record is
+[`docs/research/2026-11-08-claude-code-background-nesting.md`](../research/2026-11-08-claude-code-background-nesting.md),
+and the axis sources are in the
+[capability matrix §claude](../reference/host-integration-capability-matrix.md#claude).
+
+The decision is unchanged. The Workflow backend does not rest on the background-nesting gap: it runs
+from the main loop either way. The original text above stays as written.
