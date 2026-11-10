@@ -73,3 +73,63 @@ still branches on `FLATTEN`. No branch logic changed.
    fails, option (b) in #6007 applies: keep `claude` flattening in these two workflows until #6010.
 3. **Layer-1 waiting** (the "Not measured" row above). Child #6019's `WAITING ON CHILDREN` turn-end
    block handles either outcome.
+
+## 5. Merge-condition spikes (2026-11-10, Claude Code 2.1.322)
+
+Run for the two merge conditions on #6007. Host: `claude --version` prints `2.1.322 (Claude Code)`.
+Branch rebased on `origin/next`. All runs in throwaway directories, headless.
+
+### 5.1 `claude -p`: nested dispatch
+
+Probe: the main session dispatches layer 1 with `run_in_background: true`; layer 1 dispatches one
+nested `general-purpose` agent (no background flag) that sleeps 20 s, writes a timestamp and replies.
+Command shape: `claude -p "<prompt>" --allowedTools Agent "Bash(date:*)" "Bash(node -e:*)" ...
+--output-format stream-json --verbose`. Two runs, one text-output run, one positive control (layer 1
+dispatched in the foreground).
+
+| Run | layer-1 start → nested done → layer-1 end → process exit (s from main start) | exit |
+|---|---|---|
+| bg 1 | 17 → 45 → 56 → 65 | 0 |
+| bg 2 | 19 → 45 → 58 → 66 | 0 |
+| bg 3 (text output) | 19 → 44 → 57 → 68 | 0 |
+| fg control | 16 → 45 → 54 → 65 | 0 |
+
+- Under `-p`, the nested call ran in the **foreground**: it blocked layer 1 for 30-33 s and returned
+  (`subagent_stats.requested.foreground: 1`, `started_in_background: 1`, the layer-1 agent only).
+  This differs from the interactive 2.1.319 measurement in section 2.
+- In every background run the main session's **turn ended first** (result 0: "waiting for its
+  completion notification"). The process stayed alive, a task notification started a second turn,
+  and that turn printed the nested result. With text output both turns' texts are printed.
+- **The wait has a ceiling.** In section 5.2 the process printed to stderr: "Background tasks still
+  running 10m after the last turn (subagent "Plan phase 1: Greet"); stopping them. Set
+  CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely." The background agent was killed
+  (`killed.system: 1`) and the process exited 0.
+
+**Verdict: does not meet the condition.** Nested dispatch does not complete within the turn under
+`-p`. Background work survives the turn only for up to 10 minutes after the last turn, by default,
+and is then killed while the process still exits 0. A real plan phase exceeded that. Per #6007's
+merge condition, a survivability child has to land first.
+
+### 5.2 The flip: `FLATTEN=false` branches end to end
+
+Fixture: a two-phase Node project (phase 1 one plan, phase 2 a two-plan wave), CONTEXT.md written,
+GSD installed with this branch's `bin/install.js --claude --local`, `workflow.text_mode: true`,
+`research: false`. `dispatch-should-flatten --raw` printed `false` in both fixtures, and both
+workflows reported taking the background branch. Driven with `claude -p ... --permission-mode auto`,
+one invocation per user reply (`--resume <session>`).
+
+- `/gsd-autonomous --interactive --only 1`: the plan agent was dispatched in the background. The main
+  turn ended after 1 turn; at 644 s the 10-minute ceiling killed the plan agent and its child. No
+  `PLAN.md` was written. **Did not complete.**
+- `/gsd-manager`, "Plan Phase 1": the background plan agent ran its layer-2 agents (pattern mapper,
+  planner) and **ended its own turn before its planner finished** ("paused while its own background
+  subagents keep working"). The manager then reported "The Phase 1 planner finished without a plan",
+  and corrected itself when the orphaned planner later wrote `01-01-PLAN.md`. The plan was not
+  committed, and the plan-phase pipeline after the planner (plan-checker, commit) did not run under
+  the plan agent. Wall time 1099 s. **Did not complete cleanly.** This is #5969 observation 5
+  measured under `-p`: section 4 item 3 is now answered.
+- Execute and the two-plan wave were not run: planning did not complete in either workflow.
+
+**Verdict: does not meet the condition** for either workflow. These runs were headless (`-p`), so the
+10-minute ceiling confounds the autonomous result; the manager result (a layer-1 agent ending before
+its layer-2 child) does not depend on the ceiling. An interactive end-to-end run was not made.
