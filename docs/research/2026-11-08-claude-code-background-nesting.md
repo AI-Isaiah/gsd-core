@@ -133,3 +133,11 @@ one invocation per user reply (`--resume <session>`).
 **Verdict: does not meet the condition** for either workflow. These runs were headless (`-p`), so the
 10-minute ceiling confounds the autonomous result; the manager result (a layer-1 agent ending before
 its layer-2 child) does not depend on the ceiling. An interactive end-to-end run was not made.
+
+## 6. Survivability signal (#6119)
+
+The follow-up question, whether GSD can tell a `claude -p` session from an interactive one from a
+documented host signal, is answered in its own record:
+[2026-11-19-claude-code-survivability-signal.md](2026-11-19-claude-code-survivability-signal.md).
+It found no documented signal, so `claude` stays flattened until one exists or the maintainer
+decides otherwise.
