@@ -27,7 +27,7 @@ value (or the `undocumented` sentinel):
 |---|---|
 | `embeddingMode` | `imperative` \| `declarative` |
 | `commandSurface` | `slash-file` \| `slash-programmatic` \| `slash-toml` \| `palette` \| `prose-only` |
-| `dispatch` | struct: `{ namedDispatch, nested, maxDepth, background, subagentToolkit, backgroundDispatch, isolation, maxConcurrency }` |
+| `dispatch` | struct: `{ namedDispatch, nested, maxDepth, background, subagentToolkit, backgroundDispatch, backgroundSurvivesHeadless?, isolation, maxConcurrency }` |
 | `modelMode` | `active` \| `passive` |
 | `hookBus` | `host` \| `engine` \| `none` |
 | `stateIO` | `filesystem` \| `sandboxed-storage` \| `session-log-append` |
@@ -47,6 +47,11 @@ unchanged. Its live transport (`GSD_DISPATCH_MAX_CONCURRENCY`) is read only at
 the CLI query layer (`gsd-tools query dispatch-capacity`), never inside this
 pure negotiation module, and takes precedence over the descriptor value, which
 in turn takes precedence over the `1` fallback.
+
+`dispatch.backgroundSurvivesHeadless` (`true` \| `false` \| `undocumented`, added #6119) is
+optional and is not negotiated. `shouldFlattenDispatch` reads it from the declared descriptor:
+`false` or `undocumented` returns `true` (inline) in every session, because no host signal says
+whether the session is a one-shot run. An absent value leaves the verdict to the other fields.
 
 ## Classification + negotiation
 
