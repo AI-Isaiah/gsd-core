@@ -307,11 +307,12 @@ describe('ADR-1239 Phase A: hostIntegration descriptors', () => {
 
   // ─── shouldFlattenDispatch per-host (#853 discriminator) ─────────────────────
 
-  // Expected: false (may background) ONLY for cursor and claude — the shipped hosts whose
-  // dispatch declares background + backgroundDispatch + nested:true +
-  // subagentToolkit:"full" + a depth budget > 1. true (must inline) for the rest.
-  // #6007: claude joined the set when the Claude Code 2.1.319 re-measure showed a
-  // backgrounded agent keeps `Agent` below the depth limit (default 3 layers).
+  // Expected: false (may background) ONLY for cursor — the one shipped host whose
+  // dispatch declares nested:true + subagentToolkit:"full" + a depth budget > 1 and no
+  // headless-survival hazard. true (must inline) for the rest.
+  // #6007: claude's nesting rows now allow backgrounding (the Claude Code 2.1.319 re-measure
+  // showed a backgrounded agent keeps `Agent` below the depth limit, default 3 layers), but
+  // #6119's backgroundSurvivesHeadless:false keeps it inline: `claude -p` stops background work.
   //
   // #2939: the depth-aware rule reclassifies codex/kimi/kimi-code, which the old
   // two-field (background+backgroundDispatch) rule admitted as background-eligible
@@ -323,7 +324,7 @@ describe('ADR-1239 Phase A: hostIntegration descriptors', () => {
   const EXPECTED_FLATTEN = {
     antigravity: true,
     augment:     true,
-    claude:      false,
+    claude:      true,
     cline:       true,
     codebuddy:   true,
     codex:       true,
@@ -374,11 +375,12 @@ describe('ADR-1239 Phase A: hostIntegration descriptors', () => {
 
   // #6007 / #2939: the depth gate still holds on the re-measured claude shape. If a user caps
   // CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH at 1 (nesting off), a backgrounded orchestrator has
-  // no layer left for its leaves, so the verdict must flip back to flatten.
+  // no layer left for its leaves, so the verdict must flip back to flatten. The #6119 axis is
+  // set to survive here so the depth gate is the only thing under test.
   for (const [maxDepth, expected] of [[1, true], [2, false], [3, false]]) {
     test('shouldFlattenDispatch(claude shape, maxDepth:' + maxDepth + ') === ' + expected + ' (#6007 boundary)', () => {
       const claudeDispatch = registry.runtimes.claude.runtime.hostIntegration.dispatch;
-      assert.strictEqual(shouldFlattenDispatch({ ...claudeDispatch, maxDepth }), expected);
+      assert.strictEqual(shouldFlattenDispatch({ ...claudeDispatch, backgroundSurvivesHeadless: true, maxDepth }), expected);
     });
   }
 

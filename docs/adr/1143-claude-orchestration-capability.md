@@ -239,8 +239,11 @@ The Context above says backgrounded agents on Claude Code lack the `Agent`/`Task
 the Claude Code 2.1.177 spike behind #1184. A re-measure on Claude Code 2.1.319 for
 [#6007](https://github.com/open-gsd/gsd-core/issues/6007) found that a backgrounded agent keeps
 `Agent` and can nest up to three layers below the main conversation by default. The `claude` dispatch
-descriptor now declares `backgroundDispatch: true` and `maxDepth: 3`, so `dispatch-should-flatten`
-returns `false` on Claude Code. The record is
+descriptor now declares `backgroundDispatch: true` and `maxDepth: 3`. `dispatch-should-flatten` still
+returns `true` on Claude Code, for a different reason: under `claude -p` background work is stopped at a
+ceiling after the final turn and the run still exits 0, and no documented signal tells a `-p` session
+from an interactive one, so the descriptor declares `backgroundSurvivesHeadless: false`
+([#6119](https://github.com/open-gsd/gsd-core/issues/6119)). The record is
 [`docs/research/2026-11-08-claude-code-background-nesting.md`](../research/2026-11-08-claude-code-background-nesting.md),
 and the axis sources are in the
 [capability matrix §claude](../reference/host-integration-capability-matrix.md#claude).

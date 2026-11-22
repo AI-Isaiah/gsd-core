@@ -54,9 +54,11 @@ caller through `SubagentHandback`, which the docs list as a tool of background s
   the #2939 depth gate is shown on the `claude` shape at `maxDepth: 1` (it still flattens) by a unit
   test.
 
-With these values `shouldFlattenDispatch` returns `false` for `claude`, so
-`gsd-tools query dispatch-should-flatten` prints `false` for `GSD_RUNTIME=claude`. Every workflow site
-still branches on `FLATTEN`. No branch logic changed.
+With these values alone `shouldFlattenDispatch` would return `false` for `claude`. Section 5 showed
+that unsafe under `claude -p`, so the descriptor also declares #6119's
+`backgroundSurvivesHeadless: false`, and `gsd-tools query dispatch-should-flatten` still prints `true`
+for `GSD_RUNTIME=claude` (section 6). Every workflow site still branches on `FLATTEN`. No branch logic
+changed.
 
 ## 4. Open points left for the maintainer
 
@@ -140,4 +142,5 @@ The follow-up question, whether GSD can tell a `claude -p` session from an inter
 documented host signal, is answered in its own record:
 [2026-11-19-claude-code-survivability-signal.md](2026-11-19-claude-code-survivability-signal.md).
 It found no documented signal, so `claude` stays flattened until one exists or the maintainer
-decides otherwise.
+decides otherwise. The descriptor carries that as `dispatch.backgroundSurvivesHeadless: false`, which
+makes `dispatch-should-flatten` return `true` whatever the nesting rows allow.

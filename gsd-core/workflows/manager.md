@@ -256,7 +256,7 @@ After discuss completes, loop back to dashboard step.
 
 ### Plan Phase N
 
-Planning runs autonomously. **First resolve whether background dispatch is safe.** Background dispatch is only safe on a runtime where a backgrounded agent can still nest the pipeline's subagents (plan-checker / worktree executors / verifier). This is determined from the documentation-sourced dispatch capability in the registry (#1708); on Claude Code a backgrounded agent keeps its `Agent` tool and nests up to three layers (#6007); most other runtimes prohibit or disable nesting. So run **inline** everywhere except where `dispatch-should-flatten` returns `false`.
+Planning runs autonomously. **First resolve whether background dispatch is safe.** Background dispatch is only safe on a runtime where a backgrounded agent can still nest the pipeline's subagents (plan-checker / worktree executors / verifier). This is determined from the documentation-sourced dispatch capability in the registry (#1708); on Claude Code a backgrounded agent keeps its `Agent` tool (#6007), but `claude -p` ends background work (#6119); most other runtimes cannot nest. So run **inline** everywhere except where `dispatch-should-flatten` returns `false`.
 
 ```bash
 FLATTEN=$(gsd_run query dispatch-should-flatten --raw 2>/dev/null || echo "true")
@@ -310,7 +310,7 @@ Then loop back to dashboard step.
 
 ### Execute Phase N
 
-Execution runs autonomously. **First resolve whether background dispatch is safe.** Background dispatch is only safe on a runtime where a backgrounded agent can still nest the pipeline's subagents (plan-checker / worktree executors / verifier). This is determined from the documentation-sourced dispatch capability in the registry (#1708); on Claude Code a backgrounded agent keeps its `Agent` tool and nests up to three layers (#6007); most other runtimes prohibit or disable nesting. So run **inline** everywhere except where `dispatch-should-flatten` returns `false`.
+Execution runs autonomously. **First resolve whether background dispatch is safe.** Background dispatch is only safe on a runtime where a backgrounded agent can still nest the pipeline's subagents (plan-checker / worktree executors / verifier). This is determined from the documentation-sourced dispatch capability in the registry (#1708); on Claude Code a backgrounded agent keeps its `Agent` tool (#6007), but `claude -p` ends background work (#6119); most other runtimes cannot nest. So run **inline** everywhere except where `dispatch-should-flatten` returns `false`.
 
 ```bash
 FLATTEN=$(gsd_run query dispatch-should-flatten --raw 2>/dev/null || echo "true")

@@ -1641,8 +1641,9 @@ describe('bug-853 — manager/autonomous gate background dispatch by runtime', (
     // #6007: Claude Code 2.1.319 and the live sub-agents docs show a backgrounded agent
     // keeps `Agent` below the depth limit. The prose an agent reads about its own tool set
     // must say so, at the plan site and the execute site, and the retired claim must be gone.
+    // #6119: the same sentence names why claude still runs inline (`claude -p` ends background work).
     // allow-test-rule: source-text-is-the-product (see #1708)
-    const sites = MANAGER.match(/on Claude Code a backgrounded agent keeps its `Agent` tool/g) || [];
+    const sites = MANAGER.match(/on Claude Code a backgrounded agent keeps its `Agent` tool \(#6007\), but `claude -p` ends background work \(#6119\)/g) || [];
     assert.ok(sites.length >= 2, `manager.md must state the #6007 fact at both dispatch sites, found ${sites.length}`);
     assert.doesNotMatch(MANAGER, /backgrounded agents? ha(?:s|ve) no `Agent`\/`Task` tool/);
   });
@@ -1699,7 +1700,7 @@ describe('bug-853 — manager/autonomous gate background dispatch by runtime', (
     const autoFlattenMatches = AUTONOMOUS.match(/dispatch-should-flatten/g) || [];
     assert.ok(autoFlattenMatches.length >= 2, 'autonomous.md must use dispatch-should-flatten in both 3b (plan) and 3c (execute) interactive branches');
     // #6007: the re-measured Claude Code fact replaces the retired "no Agent/Task tool" claim.
-    assert.match(AUTONOMOUS, /on Claude Code a backgrounded agent keeps its `Agent` tool/);
+    assert.match(AUTONOMOUS, /on Claude Code a backgrounded agent keeps its `Agent` tool \(#6007\), but `claude -p` ends background work \(#6119\)/);
     assert.doesNotMatch(AUTONOMOUS, /backgrounded agents? ha(?:s|ve) no `Agent`\/`Task` tool/);
   });
 
@@ -1737,7 +1738,8 @@ describe('dispatch-should-flatten query — behavioral', () => {
   //
   // Registry values (from host-integration-capability-matrix.md):
   //   codex:   background=true, backgroundDispatch=true, BUT maxDepth:1  → shouldFlatten=true  (must inline — #2939: depth budget insufficient for a bg orchestrator + leaf)
-  //   claude:  background=true, backgroundDispatch=true, maxDepth:3      → shouldFlatten=false (may background — #6007 re-measure)
+  //   claude:  background=true, backgroundDispatch=true, maxDepth:3,
+  //            BUT backgroundSurvivesHeadless=false                       → shouldFlatten=true  (must inline — #6119: `claude -p` stops background work)
   //   cursor:  background=true, backgroundDispatch=true, maxDepth:2      → shouldFlatten=false (may background — the one shipped host with a sufficient depth budget)
   //   unknown: no entry → fail-closed                                   → shouldFlatten=true  (must inline)
 
@@ -1754,14 +1756,14 @@ describe('dispatch-should-flatten query — behavioral', () => {
     }
   });
 
-  test('runtime=claude → shouldFlatten=false (#6007: a backgrounded agent keeps Agent, depth 3)', async () => {
+  test('runtime=claude → shouldFlatten=true (#6119: background work does not survive a claude -p run)', async () => {
     const tmpDir = createTempProject();
     try {
       const result = await runGsdToolsAsync(['query', 'dispatch-should-flatten', '--raw'], tmpDir, {
         GSD_RUNTIME: 'claude',
       });
       assert.ok(result.success, `Expected success, got error: ${result.error}`);
-      assert.strictEqual(result.output, 'false', `#6007: claude should return false (may background), got: ${result.output}`);
+      assert.strictEqual(result.output, 'true', `#6119: claude should return true (must inline), got: ${result.output}`);
     } finally {
       cleanupDir(tmpDir);
     }
@@ -1810,9 +1812,10 @@ describe('dispatch-should-flatten query — behavioral', () => {
     }
   });
 
-  test('runtime=claude --json carries the #6007 descriptor (backgroundDispatch:true, maxDepth:3)', async () => {
+  test('runtime=claude --json carries the #6007 descriptor and the #6119 axis that holds the verdict', async () => {
     // The verdict must come from the re-measured descriptor, not from a runtime-name check:
-    // the JSON form shows the axes the verdict was computed from.
+    // the JSON form shows the axes the verdict was computed from. The nesting rows now allow
+    // backgrounding; backgroundSurvivesHeadless:false is what keeps claude inline.
     const tmpDir = createTempProject();
     try {
       const result = await runGsdToolsAsync(['query', 'dispatch-should-flatten', '--json'], tmpDir, {
@@ -1821,9 +1824,10 @@ describe('dispatch-should-flatten query — behavioral', () => {
       assert.ok(result.success, `Expected success, got error: ${result.error}`);
       const parsed = JSON.parse(result.output);
       assert.strictEqual(parsed.runtime, 'claude');
-      assert.strictEqual(parsed.shouldFlatten, false);
+      assert.strictEqual(parsed.shouldFlatten, true);
       assert.strictEqual(parsed.dispatch.backgroundDispatch, true);
       assert.strictEqual(parsed.dispatch.maxDepth, 3);
+      assert.strictEqual(parsed.dispatch.backgroundSurvivesHeadless, false);
     } finally {
       cleanupDir(tmpDir);
     }

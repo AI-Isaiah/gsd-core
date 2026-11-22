@@ -17,9 +17,11 @@ could not nest subagents ([#853]). The autonomous loop therefore fell back to
 **inline sequential execution** — and with it silently dropped wave parallelism,
 the plan-checker, and the verifier — on the one runtime most GSD users run.
 A re-measure on Claude Code 2.1.319 ([#6007]) shows that a backgrounded agent
-now keeps `Agent` and can nest up to three layers below the main conversation,
-so `dispatch-should-flatten` no longer forces Claude Code inline. The axis
-values and their sources are in the
+now keeps `Agent` and can nest up to three layers below the main conversation.
+Claude Code still runs inline, for a different reason: under `claude -p`
+background work is stopped after the final turn while the run reports success,
+and no documented signal tells such a run from an interactive one ([#6119]).
+The axis values and their sources are in the
 [capability matrix §claude](../reference/host-integration-capability-matrix.md#claude).
 
 Claude Code ships an orchestration primitive that sidesteps exactly this: the
@@ -142,3 +144,4 @@ own runtime gate continues to no-op on non-Claude runtimes.
 [#4740]: https://github.com/open-gsd/gsd-core/issues/4740
 [#4747]: https://github.com/open-gsd/gsd-core/issues/4747
 [#6007]: https://github.com/open-gsd/gsd-core/issues/6007
+[#6119]: https://github.com/open-gsd/gsd-core/issues/6119
