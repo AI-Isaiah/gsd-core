@@ -490,6 +490,73 @@ describe('ADR-1239 Phase A: hostIntegration descriptors', () => {
 
 // allow-test-rule: source-text-is-the-product #2598 — the descriptor JSON and the
 // host-integration matrix ARE the negotiated contract; asserting their values is behavioral.
+// #6119: whether background-dispatched work outlives a one-shot (headless) run is a fact of
+// its own, separate from whether a background agent can nest (backgroundDispatch). Claude Code
+// documents that under `claude -p` background work is stopped at CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS
+// after the final turn, and the process still exits 0, so a backgrounded plan agent can lose its
+// work while the run reports success. No documented signal tells a `-p` session from an
+// interactive one, so a host that declares `backgroundSurvivesHeadless: false` must flatten in
+// every session. A host that does not declare the axis keeps today's verdict: the axis records a
+// documented hazard, and its absence is not a claim either way.
+describe('#6119: dispatch.backgroundSurvivesHeadless gates the flatten verdict', () => {
+  // The shape #6007 measures for claude: everything else would let it background.
+  const CAN_BACKGROUND = Object.freeze({
+    namedDispatch: true, nested: true, maxDepth: 3, background: true,
+    subagentToolkit: 'full', backgroundDispatch: true,
+  });
+
+  test('a host that can background and nest still flattens when background work does not survive a headless run', () => {
+    assert.strictEqual(shouldFlattenDispatch({ ...CAN_BACKGROUND, backgroundSurvivesHeadless: false }), true);
+  });
+
+  test('"undocumented" fails closed to flatten, like every other dispatch axis', () => {
+    assert.strictEqual(shouldFlattenDispatch({ ...CAN_BACKGROUND, backgroundSurvivesHeadless: 'undocumented' }), true);
+  });
+
+  test('a host that documents its background work surviving a headless run may background', () => {
+    assert.strictEqual(shouldFlattenDispatch({ ...CAN_BACKGROUND, backgroundSurvivesHeadless: true }), false);
+  });
+
+  test('counter-test: a host that does not declare the axis keeps the verdict the other axes give', () => {
+    // Without this, adding the axis would silently flatten cursor, the one host that backgrounds today.
+    assert.strictEqual(shouldFlattenDispatch({ ...CAN_BACKGROUND }), false);
+  });
+
+  test('the axis never un-flattens a host the other axes flatten', () => {
+    assert.strictEqual(shouldFlattenDispatch({ ...CAN_BACKGROUND, maxDepth: 1, backgroundSurvivesHeadless: true }), true);
+    assert.strictEqual(shouldFlattenDispatch({ ...CAN_BACKGROUND, backgroundDispatch: false, backgroundSurvivesHeadless: true }), true);
+  });
+
+  test('claude declares backgroundSurvivesHeadless: false (the documented -p background-wait ceiling)', () => {
+    const dispatch = registry.runtimes.claude.runtime.hostIntegration.dispatch;
+    assert.strictEqual(dispatch.backgroundSurvivesHeadless, false);
+  });
+
+  test('no other shipped descriptor declares the axis (each would need its own documented source)', () => {
+    const declared = RUNTIME_IDS.filter((id) => {
+      const d = registry.runtimes[id].runtime.hostIntegration.dispatch;
+      return Object.prototype.hasOwnProperty.call(d, 'backgroundSurvivesHeadless');
+    });
+    assert.deepEqual(declared, ['claude']);
+  });
+
+  test('the validator accepts the axis absent, boolean or "undocumented", and rejects anything else', () => {
+    const base = structuredClone(registry.runtimes.claude);
+    const errorsFor = (value) => {
+      const cap = structuredClone(base);
+      if (value === undefined) delete cap.runtime.hostIntegration.dispatch.backgroundSurvivesHeadless;
+      else cap.runtime.hostIntegration.dispatch.backgroundSurvivesHeadless = value;
+      return validateCapability(cap, 'claude').filter((e) => e.includes('backgroundSurvivesHeadless'));
+    };
+    for (const ok of [undefined, true, false, 'undocumented']) {
+      assert.deepEqual(errorsFor(ok), [], 'must accept ' + JSON.stringify(ok));
+    }
+    for (const bad of ['false', 'interactive-only', 0, null]) {
+      assert.strictEqual(errorsFor(bad).length, 1, 'must reject ' + JSON.stringify(bad));
+    }
+  });
+});
+
 describe('#2598: OpenCode does not declare background/concurrent subagent dispatch', () => {
   test('descriptor declares background: false', () => {
     assert.equal(
