@@ -673,9 +673,25 @@ function negotiateHostCapabilities(
  * Null-safety: if dispatch is null, undefined, or not an object, returns true
  * (inline, fail-closed) instead of throwing.
  */
-type UnvalidatedDispatch = (Partial<DispatchCapability> & { background?: unknown; backgroundDispatch?: unknown; backgroundSurvivesHeadless?: unknown }) | null | undefined;
+type UnvalidatedDispatch = (Partial<DispatchCapability> & { background?: unknown; backgroundDispatch?: unknown; backgroundSurvivesHeadless?: unknown; interactiveSessionSignal?: unknown }) | null | undefined;
 
-function shouldFlattenDispatch(dispatch: UnvalidatedDispatch): boolean {
+/**
+ * PROTOTYPE (#6119 option 2, pending the maintainer's ruling). True only when the descriptor names
+ * an interactive-session signal and the environment carries exactly that value. Any other case
+ * (no signal declared, variable absent, any other value, a malformed signal) is false, so the
+ * verdict falls back to flatten. For claude the signal is CLAUDE_CODE_ENTRYPOINT === "cli", which
+ * Claude Code does not document (measured: `cli` interactive on 2.1.322, `sdk-cli` under -p on
+ * 2.1.325). `env` is passed in so this module stays free of I/O.
+ */
+function resolveInteractiveSession(dispatch: UnvalidatedDispatch, env: Record<string, string | undefined>): boolean {
+  if (!dispatch || typeof dispatch !== 'object') return false;
+  const signal = dispatch.interactiveSessionSignal as { env?: unknown; equals?: unknown } | null | undefined;
+  if (!signal || typeof signal !== 'object') return false;
+  if (typeof signal.env !== 'string' || typeof signal.equals !== 'string' || signal.equals === '') return false;
+  return Object.prototype.hasOwnProperty.call(env, signal.env) && env[signal.env] === signal.equals;
+}
+
+function shouldFlattenDispatch(dispatch: UnvalidatedDispatch, session?: { interactive?: boolean }): boolean {
   if (!dispatch || typeof dispatch !== 'object') return true;
   // Can background at all: both background flags must be explicitly true.
   const canBackground = dispatch.background === true && dispatch.backgroundDispatch === true;
@@ -689,10 +705,12 @@ function shouldFlattenDispatch(dispatch: UnvalidatedDispatch): boolean {
   const depth = typeof dispatch.maxDepth === 'number' && Number.isFinite(dispatch.maxDepth) ? dispatch.maxDepth : 0;
   const depthSufficient = depth < 0 || depth > 1;
   if (!depthSufficient) return true;
-  // #6119: background work that a one-shot run can stop must not be backgrounded, since no
-  // documented signal says which kind of session this is. Absent: no hazard on record.
+  // #6119: background work that a one-shot run can stop must not be backgrounded unless the
+  // session is known to be interactive. Absent: no hazard on record. 'undocumented' always flattens.
   const survival = dispatch.backgroundSurvivesHeadless;
-  return survival === false || survival === 'undocumented';
+  if (survival === 'undocumented') return true;
+  if (survival === false) return session?.interactive !== true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1023,6 +1041,7 @@ export = {
   isPositiveSafeInteger,
   negotiateHostCapabilities,
   shouldFlattenDispatch,
+  resolveInteractiveSession,
   resolveDispatchType,
   hookEventSurfaceFor,
   extensionEventSurfaceFor,

@@ -583,6 +583,47 @@ describe('#6119: dispatch.backgroundSurvivesHeadless gates the flatten verdict',
   });
 });
 
+describe('#6119 option 2 (PROTOTYPE): resolveInteractiveSession and the session-aware verdict', () => {
+  const { resolveInteractiveSession } = require(path.join(__dirname, '../gsd-core/bin/lib/host-integration.cjs'));
+  const claude = registry.runtimes.claude.runtime.hostIntegration.dispatch;
+
+  test('claude is interactive only when CLAUDE_CODE_ENTRYPOINT is exactly "cli"', () => {
+    assert.strictEqual(resolveInteractiveSession(claude, { CLAUDE_CODE_ENTRYPOINT: 'cli' }), true);
+    for (const v of ['sdk-cli', 'CLI', ' cli', '', 'sdk-ts']) {
+      assert.strictEqual(resolveInteractiveSession(claude, { CLAUDE_CODE_ENTRYPOINT: v }), false, JSON.stringify(v));
+    }
+    assert.strictEqual(resolveInteractiveSession(claude, {}), false);
+  });
+
+  test('a descriptor without a signal, or with a malformed one, is never interactive', () => {
+    const cursor = registry.runtimes.cursor.runtime.hostIntegration.dispatch;
+    assert.strictEqual(resolveInteractiveSession(cursor, { CLAUDE_CODE_ENTRYPOINT: 'cli' }), false);
+    for (const bad of [null, 'cli', { env: 'CLAUDE_CODE_ENTRYPOINT' }, { env: 1, equals: 'cli' }, { env: 'X', equals: '' }]) {
+      assert.strictEqual(resolveInteractiveSession({ ...claude, interactiveSessionSignal: bad }, { CLAUDE_CODE_ENTRYPOINT: 'cli', X: '' }), false, JSON.stringify(bad));
+    }
+  });
+
+  test('an interactive session lifts only a false survival value, never "undocumented" or the other gates', () => {
+    assert.strictEqual(shouldFlattenDispatch(claude, { interactive: true }), false);
+    assert.strictEqual(shouldFlattenDispatch(claude, { interactive: false }), true);
+    assert.strictEqual(shouldFlattenDispatch(claude), true);
+    assert.strictEqual(shouldFlattenDispatch({ ...claude, backgroundSurvivesHeadless: 'undocumented' }, { interactive: true }), true);
+    assert.strictEqual(shouldFlattenDispatch({ ...claude, maxDepth: 1 }, { interactive: true }), true);
+  });
+
+  test('the validator rejects a malformed interactiveSessionSignal and accepts the shipped one', () => {
+    const errorsFor = (sig) => {
+      const cap = structuredClone(registry.runtimes.claude);
+      cap.runtime.hostIntegration.dispatch.interactiveSessionSignal = sig;
+      return validateCapability(cap, 'claude').filter((e) => e.includes('interactiveSessionSignal'));
+    };
+    assert.deepEqual(errorsFor({ env: 'CLAUDE_CODE_ENTRYPOINT', equals: 'cli' }), []);
+    for (const bad of [null, 'cli', [], { env: 'lower', equals: 'cli' }, { env: 'X', equals: '' }]) {
+      assert.strictEqual(errorsFor(bad).length, 1, JSON.stringify(bad));
+    }
+  });
+});
+
 describe('#2598: OpenCode does not declare background/concurrent subagent dispatch', () => {
   test('descriptor declares background: false', () => {
     assert.equal(

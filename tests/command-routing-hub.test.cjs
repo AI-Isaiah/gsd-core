@@ -1769,19 +1769,21 @@ describe('dispatch-should-flatten query — behavioral', () => {
     }
   });
 
-  // #6119: under `claude -p`, background work is killed 10 minutes after the last turn
-  // (CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS) and the process still exits 0, so a backgrounded
-  // plan agent loses its work silently. Claude Code documents no signal a hook or gsd-tools
-  // child can read to tell `-p` from an interactive session (the #6119 spike record, dated
-  // 2026-11-19, under the research docs). The verdict therefore stays
-  // fail-closed `true` for every session shape. The variables below are the host's
-  // UNDOCUMENTED markers, with the values measured for each shape: if one of them ever moves the
-  // verdict, an env-var heuristic was added without a documented host signal.
-  for (const [shape, markers] of [
-    ['interactive (cli, attended)', { CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CODE_SESSION_ATTENDED: '1' }],
-    ['one-shot -p (sdk-cli, unattended)', { CLAUDE_CODE_ENTRYPOINT: 'sdk-cli', CLAUDE_CODE_SESSION_ATTENDED: '0' }],
+  // #6119 option 2 (PROTOTYPE, pending the maintainer's ruling): under `claude -p`, background work
+  // is killed 10 minutes after the last turn (CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS) and the process
+  // still exits 0. Claude Code documents no signal for the session shape, so this allow-lists the
+  // one measured, undocumented marker: CLAUDE_CODE_ENTRYPOINT === "cli" (interactive, 2.1.322).
+  // Every other value, including the -p value `sdk-cli` (2.1.325), an unknown future value and an
+  // absent variable, keeps the fail-closed `true`. If the host renames or drops the marker, the
+  // `cli` row goes red here instead of a run silently backgrounding.
+  for (const [shape, markers, expected] of [
+    ['interactive (cli, attended)', { CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CODE_SESSION_ATTENDED: '1' }, false],
+    ['one-shot -p (sdk-cli, unattended)', { CLAUDE_CODE_ENTRYPOINT: 'sdk-cli', CLAUDE_CODE_SESSION_ATTENDED: '0' }, true],
+    ['unknown entrypoint value', { CLAUDE_CODE_ENTRYPOINT: 'some-future-entrypoint' }, true],
+    ['entrypoint marker absent', {}, true],
+    ['attended=1 alone does not count', { CLAUDE_CODE_SESSION_ATTENDED: '1' }, true],
   ]) {
-    test(`runtime=claude, ${shape} session → shouldFlatten=true (#6119: fail-closed, no documented survivability signal)`, async () => {
+    test(`runtime=claude, ${shape} → shouldFlatten=${expected} (#6119 option 2: only CLAUDE_CODE_ENTRYPOINT=cli backgrounds)`, async () => {
       const tmpDir = createTempProject();
       try {
         const result = await runGsdToolsAsync(['query', 'dispatch-should-flatten', '--json'], tmpDir, {
@@ -1791,13 +1793,30 @@ describe('dispatch-should-flatten query — behavioral', () => {
         assert.ok(result.success, `Expected success, got error: ${result.error}`);
         const parsed = JSON.parse(result.output);
         assert.strictEqual(parsed.runtime, 'claude');
-        assert.strictEqual(parsed.shouldFlatten, true,
-          `#6119: claude must stay flattened whatever the session shape, got: ${parsed.shouldFlatten}`);
+        assert.strictEqual(parsed.shouldFlatten, expected,
+          `#6119: claude ${shape} must give shouldFlatten=${expected}, got: ${parsed.shouldFlatten}`);
+        assert.strictEqual(parsed.interactiveSession, !expected);
       } finally {
         cleanupDir(tmpDir);
       }
     });
   }
+
+  test('runtime=cursor ignores CLAUDE_CODE_ENTRYPOINT (the signal is read only from a descriptor that declares it)', async () => {
+    const tmpDir = createTempProject();
+    try {
+      const result = await runGsdToolsAsync(['query', 'dispatch-should-flatten', '--json'], tmpDir, {
+        GSD_RUNTIME: 'cursor',
+        CLAUDE_CODE_ENTRYPOINT: 'cli',
+      });
+      assert.ok(result.success, `Expected success, got error: ${result.error}`);
+      const parsed = JSON.parse(result.output);
+      assert.strictEqual(parsed.interactiveSession, false);
+      assert.strictEqual(parsed.shouldFlatten, false);
+    } finally {
+      cleanupDir(tmpDir);
+    }
+  });
 
   test('runtime=cursor → shouldFlatten=false (background dispatch safe)', async () => {
     const tmpDir = createTempProject();

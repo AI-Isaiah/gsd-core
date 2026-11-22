@@ -19,6 +19,9 @@ const SESSION_IDENTITY_ENV_KEYS = [
   'CODEX_THREAD_ID',
   'CLAUDE_SESSION_ID',
   'CLAUDE_CODE_SESSION_ID',
+  // #6119 option 2: dispatch-should-flatten reads this; an ambient `cli` from a developer's
+  // Claude Code session must not reach a test.
+  'CLAUDE_CODE_ENTRYPOINT',
   'CLAUDE_CODE_SSE_PORT',
   'OPENCODE_SESSION_ID',
   'GEMINI_SESSION_ID',

@@ -2355,14 +2355,19 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
 
             // Call shouldFlattenDispatch from host-integration.cjs.
             const hostIntegration = require('./lib/host-integration.cjs');
+            // #6119 option 2 (PROTOTYPE): the descriptor's interactive-session signal, read
+            // from the environment at use time.
+            const interactiveSession = dispatch !== null
+              && hostIntegration.resolveInteractiveSession(dispatch, process.env);
             const shouldFlat = dispatch !== null
-              ? hostIntegration.shouldFlattenDispatch(dispatch)
+              ? hostIntegration.shouldFlattenDispatch(dispatch, { interactive: interactiveSession })
               : true; // fail-closed: unknown runtime → inline
 
             if (parsed.json) {
               output({
                 runtime: runtimeId,
                 shouldFlatten: shouldFlat,
+                interactiveSession: interactiveSession === true,
                 dispatch: dispatch,
               }, raw);
             } else {

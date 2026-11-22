@@ -602,6 +602,10 @@ const capabilities = {
           "subagentToolkit": "full",
           "backgroundDispatch": true,
           "backgroundSurvivesHeadless": false,
+          "interactiveSessionSignal": {
+            "env": "CLAUDE_CODE_ENTRYPOINT",
+            "equals": "cli"
+          },
           "isolation": "harness-worktree",
           "maxConcurrency": 20
         },
@@ -6197,6 +6201,10 @@ const runtimes = {
           "subagentToolkit": "full",
           "backgroundDispatch": true,
           "backgroundSurvivesHeadless": false,
+          "interactiveSessionSignal": {
+            "env": "CLAUDE_CODE_ENTRYPOINT",
+            "equals": "cli"
+          },
           "isolation": "harness-worktree",
           "maxConcurrency": 20
         },

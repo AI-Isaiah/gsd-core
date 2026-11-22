@@ -1692,6 +1692,21 @@ function validateRuntimeBody(cap) {
         );
       }
 
+      // interactiveSessionSignal — #6119 option 2 (PROTOTYPE). OPTIONAL: { env, equals }, both
+      // non-empty strings, env an upper-case variable name.
+      if (d.interactiveSessionSignal !== undefined) {
+        const sig = d.interactiveSessionSignal;
+        const ok = sig !== null && typeof sig === 'object' && !Array.isArray(sig)
+          && typeof sig.env === 'string' && /^[A-Z_][A-Z0-9_]*$/.test(sig.env)
+          && typeof sig.equals === 'string' && sig.equals !== '';
+        if (!ok) {
+          errors.push(
+            'runtime.hostIntegration.dispatch.interactiveSessionSignal must be { env: "<UPPER_CASE_NAME>", equals: "<non-empty>" } (got: '
+            + JSON.stringify(sig) + ')',
+          );
+        }
+      }
+
       // isolation — ADR-1239 Codex-binding amendment (#2584).
       // OPTIONAL, like effortSurface: added after descriptors already existed,
       // so requiring it would invalidate every descriptor authored before it —

@@ -86,6 +86,7 @@
         "subagentToolkit": "full",
         "backgroundDispatch": true,
         "backgroundSurvivesHeadless": false,
+        "interactiveSessionSignal": { "env": "CLAUDE_CODE_ENTRYPOINT", "equals": "cli" },
         "isolation": "harness-worktree",
         "maxConcurrency": 20
       },
