@@ -601,6 +601,7 @@ const capabilities = {
           "background": true,
           "subagentToolkit": "full",
           "backgroundDispatch": false,
+          "backgroundSurvivesHeadless": false,
           "isolation": "harness-worktree",
           "maxConcurrency": 20
         },
@@ -6195,6 +6196,7 @@ const runtimes = {
           "background": true,
           "subagentToolkit": "full",
           "backgroundDispatch": false,
+          "backgroundSurvivesHeadless": false,
           "isolation": "harness-worktree",
           "maxConcurrency": 20
         },

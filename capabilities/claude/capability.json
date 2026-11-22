@@ -85,6 +85,7 @@
         "background": true,
         "subagentToolkit": "full",
         "backgroundDispatch": false,
+        "backgroundSurvivesHeadless": false,
         "isolation": "harness-worktree",
         "maxConcurrency": 20
       },

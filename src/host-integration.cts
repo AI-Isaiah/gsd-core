@@ -639,7 +639,16 @@ function negotiateHostCapabilities(
  *     delegated leaf (depth 2) its own contract would require.
  *
  * Any other value (false, missing, 'undocumented', or an insufficient depth budget) fails closed
- * to inline (the always-safe path). This closes #2939, where a `maxDepth:1` descriptor
+ * to inline (the always-safe path).
+ *
+ * #6119: a host that passes all three may still have to flatten. `backgroundSurvivesHeadless`
+ * records whether background-dispatched work outlives a one-shot (headless) run. Claude Code
+ * documents that under `claude -p` it stops background work at a ceiling after the final turn
+ * (`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`) while the process still exits 0, and it documents no
+ * signal that tells a `-p` session from an interactive one. So `false` (or `'undocumented'`)
+ * flattens in every session. The axis is optional: it records a documented hazard, so a
+ * descriptor that does not declare it keeps the verdict the other axes give (cursor stays
+ * background-eligible). See docs/research/2026-11-19-claude-code-survivability-signal.md. This closes #2939, where a `maxDepth:1` descriptor
  * (the live Codex capability) was told it may background a nesting orchestrator that then
  * produced a depth-2 tree its declared contract cannot support.
  *
@@ -664,7 +673,7 @@ function negotiateHostCapabilities(
  * Null-safety: if dispatch is null, undefined, or not an object, returns true
  * (inline, fail-closed) instead of throwing.
  */
-type UnvalidatedDispatch = (Partial<DispatchCapability> & { background?: unknown; backgroundDispatch?: unknown }) | null | undefined;
+type UnvalidatedDispatch = (Partial<DispatchCapability> & { background?: unknown; backgroundDispatch?: unknown; backgroundSurvivesHeadless?: unknown }) | null | undefined;
 
 function shouldFlattenDispatch(dispatch: UnvalidatedDispatch): boolean {
   if (!dispatch || typeof dispatch !== 'object') return true;
@@ -679,7 +688,11 @@ function shouldFlattenDispatch(dispatch: UnvalidatedDispatch): boolean {
   if (!canNest) return true;
   const depth = typeof dispatch.maxDepth === 'number' && Number.isFinite(dispatch.maxDepth) ? dispatch.maxDepth : 0;
   const depthSufficient = depth < 0 || depth > 1;
-  return !depthSufficient;
+  if (!depthSufficient) return true;
+  // #6119: background work that a one-shot run can stop must not be backgrounded, since no
+  // documented signal says which kind of session this is. Absent: no hazard on record.
+  const survival = dispatch.backgroundSurvivesHeadless;
+  return survival === false || survival === 'undocumented';
 }
 
 // ---------------------------------------------------------------------------

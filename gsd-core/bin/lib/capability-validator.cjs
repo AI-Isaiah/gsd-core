@@ -1680,6 +1680,18 @@ function validateRuntimeBody(cap) {
         );
       }
 
+      // backgroundSurvivesHeadless — #6119. OPTIONAL, like isolation: it records a documented
+      // hazard (background work stopped at the end of a one-shot run), so only a host that
+      // documents one declares it. Only a PRESENT value is checked.
+      if (d.backgroundSurvivesHeadless !== undefined
+        && typeof d.backgroundSurvivesHeadless !== 'boolean'
+        && d.backgroundSurvivesHeadless !== 'undocumented') {
+        errors.push(
+          'runtime.hostIntegration.dispatch.backgroundSurvivesHeadless must be a boolean or "undocumented" (got: '
+          + JSON.stringify(d.backgroundSurvivesHeadless) + ')',
+        );
+      }
+
       // isolation — ADR-1239 Codex-binding amendment (#2584).
       // OPTIONAL, like effortSurface: added after descriptors already existed,
       // so requiring it would invalidate every descriptor authored before it —
