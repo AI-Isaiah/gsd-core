@@ -159,6 +159,26 @@ Two things ADR-2313 settles that this ADR asserted but the tree contradicted:
 
 **Numbering note.** ADR-2313 is prefixed with the **epic** number, not #2310. #2310 is the closed bug issue whose emission *guard* shipped separately in PR #2312; `CONTRIBUTING.md` § "Proposing an ADR or PRD" makes the approved issue's number the filename prefix. Earlier text on #2313 referring to "ADR-2310" predates that ruling.
 
+## Amendment (2026-11-22): `dispatch.backgroundSurvivesHeadless` (#6119)
+
+`dispatch` gains an optional sub-field, `backgroundSurvivesHeadless` (`true` | `false` |
+`undocumented`). It records whether background-dispatched work outlives a one-shot (headless,
+non-interactive) run. It is a sub-field for the same reason `isolation` and `maxConcurrency` are:
+only the fan-out decision reads it.
+
+- **Consumer.** `shouldFlattenDispatch` reads it from the declared descriptor, after the
+  background, nesting and depth gates. `false` or `undocumented` returns `true` (inline), because no
+  host documents a signal that tells a one-shot run from an interactive one. It is not negotiated,
+  so `negotiateHostCapabilities` and `SAFE_DEFAULTS` are unchanged.
+- **Absent is not a claim.** Unlike the other dispatch sub-fields, an absent value is not
+  fail-closed. The field records a documented hazard, so a host declares it only with a source, and
+  an absent value leaves the verdict to the other sub-fields. Making absence flatten would flip
+  `cursor`, the one host that backgrounds today, without a source for it.
+- **Declared by.** `claude` only: `false`, from the documented `claude -p` background-wait ceiling
+  (`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`). The value and its sources are in the
+  [capability matrix §claude](../reference/host-integration-capability-matrix.md#claude), and the spike is in
+  [2026-11-19-claude-code-survivability-signal.md](../research/2026-11-19-claude-code-survivability-signal.md).
+
 ## Host-capability profiles (negotiation baselines)
 
 - **Programmatic-CLI** (Claude Code, pi, OpenCode): imperative; full dispatch; host hook bus; MCP; `slash` surface. The richest target — minimal degradation.
